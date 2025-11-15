@@ -1,0 +1,47 @@
+# Telegram Automation System - Configuration File
+# Version: 1.0
+
+# Лимиты и ограничения
+limits:
+  max_messages_per_hour: 30            # Сообщений в час на профиль
+  max_cycles: 1                        # Количество циклов (проходов по всем чатам)
+  delay_randomness: 0.2                # ±20% к рассчитанной задержке
+  cycle_delay_minutes: 20              # Задержка между циклами (минуты)
+
+# Таймауты
+timeouts:
+  search_timeout: 10                   # Таймаут поиска чата (секунды)
+  send_timeout: 5                      # Таймаут отправки сообщения
+  page_load_timeout: 30                # Таймаут загрузки страницы
+
+# Telegram
+telegram:
+  url: "https://web.telegram.org/k"
+  headless: false                      # Видимые окна браузера
+
+# Повторные попытки
+retry:
+  enabled: false                       # Повторять ли неудачные попытки
+  max_attempts: 3                      # Максимум попыток
+  delay_between_retries: 60            # Задержка между попытками (секунды)
+
+# Скриншоты
+screenshots:
+  enabled: true                        # Включить/выключить скриншоты
+  on_error: true                       # Скриншоты при ошибках
+  on_warning: false                    # Скриншоты при предупреждениях (чат не найден)
+  on_debug: false                      # Отладочные скриншоты
+  full_page: true                      # Скриншот всей страницы
+  quality: 80                          # Качество (0-100)
+  format: "png"                        # png/jpeg
+  max_age_days: 30                     # Удалять скриншоты старше N дней
+
+# Логирование
+logging:
+  level: "INFO"                        # DEBUG/INFO/WARNING/ERROR
+  format: "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
+
+# База данных
+database:
+  path: "db/telegram_automation.db"
+  wal_mode: true                       # Использовать WAL режим

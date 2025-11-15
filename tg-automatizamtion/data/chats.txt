@@ -1,0 +1,6 @@
+# Test chats for Telegram Automation
+# One message will be sent to each chat
+
+@mak_qweengroup
+@chatt_avito
+@avitovirk

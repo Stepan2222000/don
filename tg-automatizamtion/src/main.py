@@ -1,0 +1,414 @@
+"""
+Main CLI module for Telegram Automation System
+
+Provides command-line interface for managing profiles, tasks, and automation.
+"""
+
+import argparse
+import sys
+import json
+import asyncio
+import signal
+from pathlib import Path
+from typing import List, Optional
+
+from .config import load_config, create_default_config, get_config
+from .database import init_database, get_database
+from .logger import init_logger, get_logger
+from .profile_manager import init_profile_manager, get_profile_manager
+from .task_queue import get_task_queue
+
+
+class WorkerManager:
+    """Manages multiple worker processes."""
+
+    def __init__(self, profile_ids: List[str]):
+        """
+        Initialize worker manager.
+
+        Args:
+            profile_ids: List of profile UUIDs to run as workers
+        """
+        self.profile_ids = profile_ids
+        self.workers = {}  # profile_id -> Process
+        self.stop_requested = False
+
+    async def start_worker(self, profile_id: str):
+        """Start worker process for profile."""
+        logger = get_logger()
+        logger.info(f"Starting worker for profile: {profile_id}")
+
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "src.worker",
+            "--profile-id", profile_id,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        self.workers[profile_id] = process
+        return process
+
+    async def monitor_worker(self, profile_id: str, process):
+        """Monitor worker and handle exit."""
+        logger = get_logger()
+
+        stdout, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            logger.error(f"Worker {profile_id} exited with code {process.returncode}")
+            if stderr:
+                logger.error(f"Worker {profile_id} stderr: {stderr.decode()}")
+        else:
+            logger.info(f"Worker {profile_id} finished successfully")
+
+    async def start_all(self):
+        """Start all workers."""
+        tasks = []
+        for profile_id in self.profile_ids:
+            process = await self.start_worker(profile_id)
+            task = asyncio.create_task(self.monitor_worker(profile_id, process))
+            tasks.append(task)
+
+        # Wait for all workers to finish
+        await asyncio.gather(*tasks)
+
+    async def stop_all(self):
+        """Stop all workers."""
+        logger = get_logger()
+        logger.info("Stopping all workers...")
+
+        for profile_id, process in self.workers.items():
+            if process.returncode is None:  # Still running
+                logger.info(f"Terminating worker: {profile_id}")
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Worker {profile_id} did not stop, killing...")
+                    process.kill()
+
+        logger.info("All workers stopped")
+
+
+def cmd_init(args):
+    """Initialize database and create default config."""
+    print("Initializing Telegram Automation System...")
+
+    # Create default config if doesn't exist
+    config_path = Path("config.yaml")
+    if not config_path.exists():
+        print(f"Creating default configuration: {config_path}")
+        create_default_config()
+    else:
+        print(f"Configuration file already exists: {config_path}")
+
+    # Load config
+    config = load_config()
+
+    # Initialize database
+    print(f"Initializing database: {config.database.path}")
+    init_database(config.database.path)
+
+    print("\n✓ Initialization complete!")
+    print("\nNext steps:")
+    print("  1. Edit config.yaml to adjust settings")
+    print("  2. Import chats: python -m src.main import-chats data/chats.txt")
+    print("  3. Import messages: python -m src.main import-messages data/messages.json")
+    print("  4. Add profiles: python -m src.main add-profile <profile_name>")
+    print("  5. Start automation: python -m src.main start")
+
+
+def cmd_import_chats(args):
+    """Import chats from file."""
+    chats_file = Path(args.file)
+
+    if not chats_file.exists():
+        print(f"Error: File not found: {chats_file}", file=sys.stderr)
+        sys.exit(1)
+
+    # Load config and init
+    config = load_config(args.config)
+    db = init_database(config.database.path)
+
+    # Read chats from file
+    chats = []
+    with open(chats_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                chats.append(line)
+
+    if not chats:
+        print("Error: No chats found in file", file=sys.stderr)
+        sys.exit(1)
+
+    # Import to database
+    print(f"Importing {len(chats)} chats...")
+    count = db.import_chats(chats, total_cycles=config.limits.max_cycles)
+
+    print(f"✓ Imported {count} chats successfully")
+
+
+def cmd_import_messages(args):
+    """Import messages from JSON file."""
+    messages_file = Path(args.file)
+
+    if not messages_file.exists():
+        print(f"Error: File not found: {messages_file}", file=sys.stderr)
+        sys.exit(1)
+
+    # Load config and init
+    config = load_config(args.config)
+    db = init_database(config.database.path)
+
+    # Read messages from JSON
+    with open(messages_file, 'r', encoding='utf-8') as f:
+        messages = json.load(f)
+
+    if not isinstance(messages, list):
+        print("Error: Messages file must contain a JSON array", file=sys.stderr)
+        sys.exit(1)
+
+    if not messages:
+        print("Error: No messages found in file", file=sys.stderr)
+        sys.exit(1)
+
+    # Import to database
+    print(f"Importing {len(messages)} messages...")
+    count = db.import_messages(messages)
+
+    print(f"✓ Imported {count} messages successfully")
+
+
+def cmd_add_profile(args):
+    """Add profile to automation."""
+    # Load config and init
+    config = load_config(args.config)
+    db = init_database(config.database.path)
+    profile_manager = init_profile_manager()
+
+    # Get profile by name or ID
+    profile_names = args.profiles
+
+    try:
+        profiles = profile_manager.find_profiles_by_names(profile_names)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Add to database
+    for profile in profiles:
+        try:
+            profile_manager.validate_profile(profile)
+            db.add_profile(profile.profile_id, profile.profile_name)
+            print(f"✓ Added profile: {profile.profile_name} ({profile.profile_id})")
+        except ValueError as e:
+            print(f"✗ Skipped {profile.profile_name}: {e}", file=sys.stderr)
+
+
+def cmd_list_profiles(args):
+    """List available profiles."""
+    profile_manager = init_profile_manager()
+
+    if args.db_only:
+        # List profiles in database
+        config = load_config(args.config)
+        db = init_database(config.database.path)
+        profiles = db.get_active_profiles()
+
+        print(f"\nProfiles in database ({len(profiles)}):\n")
+        print(f"{'Name':<20} {'ID':<36} {'Active':<8} {'Blocked':<8}")
+        print("-" * 75)
+
+        for profile in profiles:
+            print(
+                f"{profile['profile_name']:<20} "
+                f"{profile['profile_id']:<36} "
+                f"{'Yes' if profile['is_active'] else 'No':<8} "
+                f"{'Yes' if profile['is_blocked'] else 'No':<8}"
+            )
+    else:
+        # List all Donut Browser profiles
+        profile_manager.print_profiles_table()
+
+
+def cmd_start(args):
+    """Start automation with workers."""
+    # Load config and init
+    config = load_config(args.config)
+    db = init_database(config.database.path)
+    logger = init_logger(
+        log_dir="logs",
+        level=config.logging.level,
+        log_format=config.logging.format
+    )
+    init_profile_manager()
+    task_queue = get_task_queue()
+
+    # Reset any stale tasks from previous crashes
+    logger.info("Resetting stale tasks from previous runs...")
+    stale_count = task_queue.reset_stale_tasks()
+    if stale_count > 0:
+        logger.info(f"Reset {stale_count} stale tasks")
+
+    # Get active profiles
+    profiles = db.get_active_profiles()
+
+    if not profiles:
+        print("Error: No active profiles. Add profiles first with 'add-profile' command.", file=sys.stderr)
+        sys.exit(1)
+
+    # Limit workers if specified
+    if args.workers:
+        profiles = profiles[:args.workers]
+
+    profile_ids = [p['profile_id'] for p in profiles]
+
+    print(f"\nStarting automation with {len(profile_ids)} worker(s)...")
+    print(f"Profiles: {', '.join([p['profile_name'] for p in profiles])}\n")
+
+    # Create worker manager
+    manager = WorkerManager(profile_ids)
+
+    # Setup signal handler for graceful shutdown
+    def signal_handler(sig, frame):
+        print("\n\nShutdown requested (Ctrl+C)...")
+        manager.stop_requested = True
+        # Don't create task here - will cause RuntimeError
+        # The KeyboardInterrupt will be raised and handled below
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Run workers
+    try:
+        asyncio.run(manager.start_all())
+    except KeyboardInterrupt:
+        print("\nAutomation stopped by user")
+        # Graceful shutdown of workers
+        asyncio.run(manager.stop_all())
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
+
+    print("\n✓ Automation completed")
+
+
+def cmd_status(args):
+    """Show automation status."""
+    # Load config and init
+    config = load_config(args.config)
+    init_logger(level=config.logging.level, log_format=config.logging.format)
+    db = init_database(config.database.path)
+    task_queue = get_task_queue()
+
+    # Get queue stats
+    stats = task_queue.get_queue_stats()
+
+    print("\n" + "=" * 60)
+    print("AUTOMATION STATUS")
+    print("=" * 60)
+
+    print(f"\nTasks Overview:")
+    print(f"  Total tasks:     {stats.get('total', 0)}")
+    print(f"  Pending:         {stats.get('pending', 0)} ({stats.get('pending_percent', 0):.1f}%)")
+    print(f"  In Progress:     {stats.get('in_progress', 0)}")
+    print(f"  Completed:       {stats.get('completed', 0)} ({stats.get('completed_percent', 0):.1f}%)")
+    print(f"  Blocked:         {stats.get('blocked', 0)} ({stats.get('blocked_percent', 0):.1f}%)")
+
+    print(f"\nResults:")
+    print(f"  Total Success:   {stats.get('total_success', 0)}")
+    print(f"  Total Failed:    {stats.get('total_failed', 0)}")
+
+    # Profile stats
+    profiles = db.get_active_profiles()
+    if profiles:
+        print(f"\nActive Profiles ({len(profiles)}):")
+        for profile in profiles:
+            status = "BLOCKED" if profile['is_blocked'] else "Active"
+            print(f"  - {profile['profile_name']}: {status}")
+
+    print("\n" + "=" * 60 + "\n")
+
+
+def cmd_stop(args):
+    """Stop all workers."""
+    print("Note: Workers stop automatically when tasks are done.")
+    print("To force stop, use Ctrl+C while automation is running.")
+
+
+def main():
+    """Main CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="Telegram Automation System",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    parser.add_argument(
+        '--config',
+        default='config.yaml',
+        help="Path to config.yaml file (default: config.yaml)"
+    )
+
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+
+    # init command
+    parser_init = subparsers.add_parser('init', help='Initialize database and config')
+
+    # import-chats command
+    parser_import_chats = subparsers.add_parser('import-chats', help='Import chats from file')
+    parser_import_chats.add_argument('file', help='Path to chats file (one @username per line)')
+
+    # import-messages command
+    parser_import_messages = subparsers.add_parser('import-messages', help='Import messages from JSON')
+    parser_import_messages.add_argument('file', help='Path to messages JSON file')
+
+    # add-profile command
+    parser_add_profile = subparsers.add_parser('add-profile', help='Add profile(s) for automation')
+    parser_add_profile.add_argument('profiles', nargs='+', help='Profile name(s) to add')
+
+    # list-profiles command
+    parser_list_profiles = subparsers.add_parser('list-profiles', help='List available profiles')
+    parser_list_profiles.add_argument('--db-only', action='store_true', help='Show only profiles in database')
+
+    # start command
+    parser_start = subparsers.add_parser('start', help='Start automation')
+    parser_start.add_argument('--workers', type=int, help='Number of workers (default: all active profiles)')
+
+    # status command
+    parser_status = subparsers.add_parser('status', help='Show automation status')
+
+    # stop command
+    parser_stop = subparsers.add_parser('stop', help='Stop automation')
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    # Route to command handlers
+    commands = {
+        'init': cmd_init,
+        'import-chats': cmd_import_chats,
+        'import-messages': cmd_import_messages,
+        'add-profile': cmd_add_profile,
+        'list-profiles': cmd_list_profiles,
+        'start': cmd_start,
+        'status': cmd_status,
+        'stop': cmd_stop,
+    }
+
+    handler = commands.get(args.command)
+    if handler:
+        try:
+            handler(args)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,9 @@
+# Telegram Automation System - Python Dependencies
+
+# Browser automation
+playwright>=1.40.0
+
+# Configuration
+pyyaml>=6.0
+
+# Note: SQLite is built into Python, no installation needed
