@@ -23,9 +23,9 @@ class TaskQueue:
         self.config = get_config()
         self.logger = get_logger()
 
-    def get_next_incomplete_task(self, profile_id: str) -> Optional[Dict[str, Any]]:
+    def get_next_incomplete_task(self, group_id: str, profile_id: str) -> Optional[Dict[str, Any]]:
         """
-        Atomically get next incomplete task for worker.
+        Atomically get next incomplete task for worker from a specific group.
 
         Uses UPDATE + RETURNING for atomicity to prevent race conditions
         between multiple workers.
@@ -35,6 +35,7 @@ class TaskQueue:
         2. Tasks that haven't been attempted recently (fairness)
 
         Args:
+            group_id: Campaign group ID
             profile_id: Worker profile ID
 
         Returns:
@@ -65,7 +66,8 @@ class TaskQueue:
                     WHERE id = (
                         SELECT id FROM tasks
                         WHERE
-                            is_blocked = 0
+                            group_id = :group_id
+                            AND is_blocked = 0
                             AND completed_cycles < total_cycles
                             AND (next_available_at IS NULL OR next_available_at <= CURRENT_TIMESTAMP)
                             AND (status = 'pending' OR (status = 'in_progress' AND assigned_profile_id = :profile_id))
@@ -76,7 +78,7 @@ class TaskQueue:
                     )
                     RETURNING *
                     """,
-                    {"profile_id": profile_id}
+                    {"group_id": group_id, "profile_id": profile_id}
                 )
 
                 row = cursor.fetchone()
@@ -84,12 +86,12 @@ class TaskQueue:
                     task = dict(row)
                     self.logger.debug(
                         f"Task acquired: {task['chat_username']} "
-                        f"(cycle {task['completed_cycles'] + 1}/{task['total_cycles']}) "
+                        f"(group: {group_id}, cycle {task['completed_cycles'] + 1}/{task['total_cycles']}) "
                         f"by profile {profile_id}"
                     )
                     return task
                 else:
-                    self.logger.debug(f"No tasks available for profile {profile_id}")
+                    self.logger.debug(f"No tasks available for profile {profile_id} in group {group_id}")
                     return None
 
         except Exception as e:
@@ -118,20 +120,23 @@ class TaskQueue:
         self.logger.debug(f"Calculated delay: {actual_delay:.1f}s (base: {base_delay:.1f}s)")
         return actual_delay
 
-    def get_random_message(self) -> str:
+    def get_random_message(self, group_id: str) -> str:
         """
-        Get random message from active messages.
+        Get random message from active messages for a specific group.
+
+        Args:
+            group_id: Campaign group ID
 
         Returns:
             Random message text
         """
-        messages = self.db.get_active_messages()
+        messages = self.db.get_active_messages(group_id)
 
         if not messages:
-            raise RuntimeError("No active messages available. Please import messages first.")
+            raise RuntimeError(f"No active messages available for group {group_id}. Please import messages first.")
 
         message = random.choice(messages)
-        self.logger.debug(f"Selected random message: {message[:50]}...")
+        self.logger.debug(f"Selected random message for group {group_id}: {message[:50]}...")
         return message
 
     def mark_task_success(
@@ -156,6 +161,7 @@ class TaskQueue:
                 self.logger.error(f"Task {task_id} not found")
                 return
 
+            group_id = task['group_id']
             cycle_number = task['completed_cycles'] + 1
 
             # Record attempt
@@ -174,11 +180,15 @@ class TaskQueue:
             # Update message usage
             self.db.increment_message_usage(message_text)
 
-            # Update profile stats
+            # Update profile stats (hourly counter)
             self.db.update_profile_stats(profile_id)
+
+            # Update profile daily stats
+            self.db.update_profile_daily_stats(profile_id, success=True)
 
             # Log to send_log
             self.db.log_send(
+                group_id=group_id,
                 task_id=task_id,
                 profile_id=profile_id,
                 chat_username=task['chat_username'],
@@ -227,6 +237,7 @@ class TaskQueue:
                 self.logger.error(f"Task {task_id} not found")
                 return
 
+            group_id = task['group_id']
             cycle_number = task['completed_cycles'] + 1
 
             # Record attempt
@@ -243,8 +254,12 @@ class TaskQueue:
             self.db.increment_task_failed(task_id)
             self.db.increment_completed_cycles(task_id)
 
+            # Update profile daily stats
+            self.db.update_profile_daily_stats(profile_id, success=False)
+
             # Log to send_log
             self.db.log_send(
+                group_id=group_id,
                 task_id=task_id,
                 profile_id=profile_id,
                 chat_username=task['chat_username'],
@@ -291,7 +306,7 @@ class TaskQueue:
             self.logger.error(f"Error getting queue stats: {e}")
             return {}
 
-    def reset_stale_tasks(self, timeout_minutes: int = 30) -> int:
+    def reset_stale_tasks(self, timeout_minutes: int = 30, group_id: Optional[str] = None) -> int:
         """
         Reset tasks that have been in progress for too long.
 
@@ -299,6 +314,7 @@ class TaskQueue:
 
         Args:
             timeout_minutes: Minutes after which task is considered stale
+            group_id: Optional group ID to filter tasks
 
         Returns:
             Number of reset tasks
@@ -307,17 +323,31 @@ class TaskQueue:
             with self.db.transaction() as conn:
                 cutoff_time = datetime.now() - timedelta(minutes=timeout_minutes)
 
-                cursor = conn.execute(
-                    """
-                    UPDATE tasks
-                    SET status = 'pending',
-                        assigned_profile_id = NULL
-                    WHERE status = 'in_progress'
-                      AND updated_at < ?
-                    RETURNING chat_username
-                    """,
-                    (cutoff_time,)
-                )
+                if group_id:
+                    cursor = conn.execute(
+                        """
+                        UPDATE tasks
+                        SET status = 'pending',
+                            assigned_profile_id = NULL
+                        WHERE status = 'in_progress'
+                          AND group_id = ?
+                          AND updated_at < ?
+                        RETURNING chat_username
+                        """,
+                        (group_id, cutoff_time,)
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        UPDATE tasks
+                        SET status = 'pending',
+                            assigned_profile_id = NULL
+                        WHERE status = 'in_progress'
+                          AND updated_at < ?
+                        RETURNING chat_username
+                        """,
+                        (cutoff_time,)
+                    )
 
                 reset_tasks = [row[0] for row in cursor.fetchall()]
 

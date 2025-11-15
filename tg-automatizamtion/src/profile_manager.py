@@ -272,3 +272,27 @@ def init_profile_manager(profiles_dir: Optional[str] = None) -> ProfileManager:
     global _profile_manager_instance
     _profile_manager_instance = ProfileManager(profiles_dir)
     return _profile_manager_instance
+
+
+# =====================================================
+# Convenience functions for scripts
+# =====================================================
+
+def get_all_profiles() -> List[DonutProfile]:
+    """Get all Donut Browser profiles (convenience wrapper)."""
+    return get_profile_manager().get_all_profiles()
+
+
+def get_profile_by_name(profile_name: str) -> Optional[DonutProfile]:
+    """Get profile by name (convenience wrapper)."""
+    return get_profile_manager().get_profile_by_name(profile_name)
+
+
+def get_profile_by_id(profile_id: str) -> Optional[DonutProfile]:
+    """Get profile by ID (convenience wrapper)."""
+    return get_profile_manager().get_profile_by_id(profile_id)
+
+
+def print_profiles_table():
+    """Print profiles table (convenience wrapper)."""
+    return get_profile_manager().print_profiles_table()

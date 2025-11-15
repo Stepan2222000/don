@@ -243,13 +243,42 @@ class TelegramSender:
             #     self.logger.warning("Account is frozen by Telegram")
             #     return restrictions
 
-            # Check 2: Need to join channel
+            # Check 2: Join channel if needed
             join_btn = self.page.locator(TelegramSelectors.JOIN_BUTTON)
             if join_btn.count() > 0:
-                restrictions['can_send'] = False
-                restrictions['reason'] = 'need_to_join'
-                self.logger.debug("Need to join channel to send message")
-                return restrictions
+                self.logger.info("JOIN button detected, attempting to join channel...")
+
+                try:
+                    # Click JOIN button with force to avoid auto-scroll issues
+                    join_btn.first.click(force=True)
+                    self.logger.debug("Clicked JOIN button")
+
+                    # Wait for button to disappear (successful join)
+                    try:
+                        self.page.wait_for_selector(
+                            TelegramSelectors.JOIN_BUTTON,
+                            state="hidden",
+                            timeout=10000
+                        )
+                        self.logger.info("Successfully joined channel")
+
+                        # Wait for UI to stabilize after joining
+                        self.page.wait_for_timeout(3000)
+
+                        # Continue with other checks (don't return, button is gone now)
+
+                    except PlaywrightTimeout:
+                        # Button didn't disappear - join failed
+                        self.logger.error("JOIN button did not disappear - join may have failed")
+                        restrictions['can_send'] = False
+                        restrictions['reason'] = 'need_to_join'
+                        return restrictions
+
+                except Exception as e:
+                    self.logger.error(f"Error clicking JOIN button: {e}")
+                    restrictions['can_send'] = False
+                    restrictions['reason'] = 'need_to_join'
+                    return restrictions
 
             # Check 3: Premium required
             premium_btn = self.page.locator(TelegramSelectors.PREMIUM_BUTTON)

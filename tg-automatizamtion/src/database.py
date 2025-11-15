@@ -176,11 +176,12 @@ class Database:
     # Tasks operations
     # ========================================
 
-    def import_chats(self, chat_usernames: List[str], total_cycles: int = 1) -> int:
+    def import_chats(self, group_id: str, chat_usernames: List[str], total_cycles: int = 1) -> int:
         """
-        Import chats as tasks.
+        Import chats as tasks for a specific group.
 
         Args:
+            group_id: Campaign group ID
             chat_usernames: List of @username strings
             total_cycles: Number of cycles to complete
 
@@ -196,12 +197,12 @@ class Database:
 
                 conn.execute(
                     """
-                    INSERT INTO tasks (chat_username, total_cycles)
-                    VALUES (?, ?)
-                    ON CONFLICT(chat_username) DO UPDATE SET
+                    INSERT INTO tasks (group_id, chat_username, total_cycles)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(group_id, chat_username) DO UPDATE SET
                         total_cycles = excluded.total_cycles
                     """,
-                    (username, total_cycles)
+                    (group_id, username, total_cycles)
                 )
                 count += 1
         return count
@@ -356,11 +357,12 @@ class Database:
     # Messages operations
     # ========================================
 
-    def import_messages(self, messages: List[str]) -> int:
+    def import_messages(self, group_id: str, messages: List[str]) -> int:
         """
-        Import messages for sending.
+        Import messages for sending to a specific group.
 
         Args:
+            group_id: Campaign group ID
             messages: List of message texts
 
         Returns:
@@ -371,19 +373,20 @@ class Database:
             for text in messages:
                 conn.execute(
                     """
-                    INSERT INTO messages (text)
-                    VALUES (?)
+                    INSERT INTO messages (group_id, text)
+                    VALUES (?, ?)
                     """,
-                    (text,)
+                    (group_id, text)
                 )
                 count += 1
         return count
 
-    def get_active_messages(self) -> List[str]:
-        """Get all active messages."""
+    def get_active_messages(self, group_id: str) -> List[str]:
+        """Get all active messages for a specific group."""
         conn = self._get_connection()
         cursor = conn.execute(
-            "SELECT text FROM messages WHERE is_active = 1"
+            "SELECT text FROM messages WHERE group_id = ? AND is_active = 1",
+            (group_id,)
         )
         return [row[0] for row in cursor.fetchall()]
 
@@ -405,6 +408,7 @@ class Database:
 
     def log_send(
         self,
+        group_id: str,
         task_id: Optional[int],
         profile_id: str,
         chat_username: str,
@@ -418,13 +422,13 @@ class Database:
             cursor = conn.execute(
                 """
                 INSERT INTO send_log (
-                    task_id, profile_id, chat_username,
+                    group_id, task_id, profile_id, chat_username,
                     message_text, status, error_type, error_details
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id
                 """,
-                (task_id, profile_id, chat_username,
+                (group_id, task_id, profile_id, chat_username,
                  message_text, status, error_type, error_details)
             )
             return cursor.fetchone()[0]
@@ -462,6 +466,100 @@ class Database:
                 """,
                 (days,)
             )
+
+    # ========================================
+    # Group operations
+    # ========================================
+
+    def clear_group_tasks(self, group_id: str):
+        """Clear all tasks for a specific group."""
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM tasks WHERE group_id = ?", (group_id,))
+
+    def clear_group_messages(self, group_id: str):
+        """Clear all messages for a specific group."""
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM messages WHERE group_id = ?", (group_id,))
+
+    def get_group_stats(self, group_id: str) -> Dict[str, Any]:
+        """Get statistics for a specific group."""
+        conn = self._get_connection()
+        cursor = conn.execute(
+            """
+            SELECT * FROM group_stats WHERE group_id = ?
+            """,
+            (group_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+
+    def get_all_groups(self) -> List[str]:
+        """Get list of all group IDs from database."""
+        conn = self._get_connection()
+        cursor = conn.execute(
+            """
+            SELECT DISTINCT group_id FROM tasks
+            UNION
+            SELECT DISTINCT group_id FROM messages
+            """
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+    # ========================================
+    # Profile statistics operations
+    # ========================================
+
+    def update_profile_daily_stats(self, profile_id: str, success: bool = True):
+        """Update daily statistics for profile."""
+        with self.transaction() as conn:
+            # Get current date
+            today = datetime.now().date().isoformat()
+
+            # Insert or update daily stats
+            conn.execute(
+                """
+                INSERT INTO profile_daily_stats (profile_id, date, messages_sent, successful_sends, failed_sends)
+                VALUES (?, ?, 1, ?, ?)
+                ON CONFLICT(profile_id, date) DO UPDATE SET
+                    messages_sent = messages_sent + 1,
+                    successful_sends = successful_sends + ?,
+                    failed_sends = failed_sends + ?,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (profile_id, today, 1 if success else 0, 0 if success else 1,
+                 1 if success else 0, 0 if success else 1)
+            )
+
+    def get_profile_daily_stats(self, profile_id: str, days: int = 7) -> List[Dict[str, Any]]:
+        """Get daily statistics for profile for last N days."""
+        conn = self._get_connection()
+        cursor = conn.execute(
+            """
+            SELECT * FROM profile_daily_stats
+            WHERE profile_id = ?
+              AND date >= date('now', '-' || ? || ' days')
+            ORDER BY date DESC
+            """,
+            (profile_id, days)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_all_profiles_daily_stats(self, days: int = 1) -> List[Dict[str, Any]]:
+        """Get daily statistics for all profiles for last N days."""
+        conn = self._get_connection()
+        cursor = conn.execute(
+            """
+            SELECT
+                pds.*,
+                p.profile_name
+            FROM profile_daily_stats pds
+            JOIN profiles p ON p.profile_id = pds.profile_id
+            WHERE pds.date >= date('now', '-' || ? || ' days')
+            ORDER BY pds.date DESC, p.profile_name
+            """,
+            (days,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
     # ========================================
     # Utility methods

@@ -23,15 +23,17 @@ from .error_handler import ErrorHandler
 class Worker:
     """Worker process for automated message sending."""
 
-    def __init__(self, profile: DonutProfile, use_simplified: bool = True):
+    def __init__(self, profile: DonutProfile, group_id: str, use_simplified: bool = True):
         """
         Initialize worker.
 
         Args:
             profile: DonutProfile to use for automation
+            group_id: Campaign group ID to process tasks for
             use_simplified: Use simplified browser automation (faster)
         """
         self.profile = profile
+        self.group_id = group_id
         self.use_simplified = use_simplified
         self.config = get_config()
         self.logger = get_logger()
@@ -102,7 +104,7 @@ class Worker:
             # Main processing loop
             while True:
                 # Get next task from queue
-                task = self.task_queue.get_next_incomplete_task(self.profile.profile_id)
+                task = self.task_queue.get_next_incomplete_task(self.group_id, self.profile.profile_id)
 
                 if task is None:
                     self.logger.info("No more tasks available. Worker finishing.")
@@ -213,7 +215,7 @@ class Worker:
                 return False
 
             # Step 4: Get random message
-            message = self.task_queue.get_random_message()
+            message = self.task_queue.get_random_message(self.group_id)
 
             # Step 5: Send message
             sent = self.telegram.send_message(message)
@@ -258,6 +260,11 @@ def main():
         '--profile-id',
         required=True,
         help="Profile UUID to use for automation"
+    )
+    parser.add_argument(
+        '--group-id',
+        required=True,
+        help="Campaign group ID to process tasks for"
     )
     parser.add_argument(
         '--config',
@@ -305,7 +312,7 @@ def main():
             sys.exit(1)
 
         # Create and run worker
-        worker = Worker(profile, use_simplified=args.simplified)
+        worker = Worker(profile, args.group_id, use_simplified=args.simplified)
         worker.run()
 
     except KeyboardInterrupt:

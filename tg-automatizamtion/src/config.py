@@ -2,11 +2,13 @@
 Configuration module for Telegram Automation System
 
 Loads and validates configuration from config.yaml file.
+Supports campaign groups with per-group settings.
 """
 
+import json
 import yaml
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
 
@@ -211,3 +213,161 @@ def create_default_config(config_path: str = "config.yaml"):
     config = Config()
     config.save_to_file(config_path)
     return config
+
+
+# =====================================================
+# Campaign Groups Support
+# =====================================================
+
+@dataclass
+class CampaignGroup:
+    """Campaign group configuration."""
+    id: str
+    profiles: List[str] = field(default_factory=list)
+    messages: List[str] = field(default_factory=list)
+    settings: Dict[str, Any] = field(default_factory=dict)
+
+    def get_merged_config(self, base_config: Config) -> Config:
+        """
+        Merge group settings with base config.
+        Group settings override base config values.
+
+        Args:
+            base_config: Base configuration from config.yaml
+
+        Returns:
+            Config instance with merged settings
+        """
+        # Start with base config as dict
+        merged = base_config.to_dict()
+
+        # Merge group settings
+        for key, value in self.settings.items():
+            if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+                # Merge nested dicts (e.g., limits, timeouts)
+                merged[key].update(value)
+            else:
+                # Direct override
+                merged[key] = value
+
+        # Create new Config from merged dict
+        return Config.from_dict(merged)
+
+
+@dataclass
+class GroupsData:
+    """Container for all campaign groups."""
+    groups: List[CampaignGroup] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'GroupsData':
+        """Create GroupsData from dictionary."""
+        groups = [
+            CampaignGroup(
+                id=g['id'],
+                profiles=g.get('profiles', []),
+                messages=g.get('messages', []),
+                settings=g.get('settings', {})
+            )
+            for g in data.get('groups', [])
+        ]
+        return cls(groups=groups)
+
+    @classmethod
+    def load_from_file(cls, groups_path: str = "data/groups.json") -> 'GroupsData':
+        """
+        Load groups from JSON file.
+
+        Args:
+            groups_path: Path to groups.json file
+
+        Returns:
+            GroupsData instance
+
+        Raises:
+            FileNotFoundError: If groups file doesn't exist
+            json.JSONDecodeError: If groups file is invalid
+        """
+        groups_file = Path(groups_path)
+
+        if not groups_file.exists():
+            raise FileNotFoundError(
+                f"Groups file not found: {groups_path}\n"
+                f"Please create data/groups.json"
+            )
+
+        with open(groups_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        return cls.from_dict(data)
+
+    def get_group(self, group_id: str) -> Optional[CampaignGroup]:
+        """Get group by ID."""
+        for group in self.groups:
+            if group.id == group_id:
+                return group
+        return None
+
+    def add_group(self, group: CampaignGroup):
+        """Add or update group."""
+        # Remove existing group with same ID
+        self.groups = [g for g in self.groups if g.id != group.id]
+        # Add new group
+        self.groups.append(group)
+
+    def remove_group(self, group_id: str) -> bool:
+        """Remove group by ID. Returns True if group was removed."""
+        original_length = len(self.groups)
+        self.groups = [g for g in self.groups if g.id != group_id]
+        return len(self.groups) < original_length
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'groups': [
+                {
+                    'id': g.id,
+                    'profiles': g.profiles,
+                    'messages': g.messages,
+                    'settings': g.settings
+                }
+                for g in self.groups
+            ]
+        }
+
+    def save_to_file(self, groups_path: str = "data/groups.json"):
+        """Save groups to JSON file."""
+        with open(groups_path, 'w', encoding='utf-8') as f:
+            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+
+
+def load_groups(groups_path: str = "data/groups.json") -> GroupsData:
+    """Load groups from JSON file."""
+    return GroupsData.load_from_file(groups_path)
+
+
+def get_group_config(group_id: str, base_config: Optional[Config] = None, groups_path: str = "data/groups.json") -> Config:
+    """
+    Get merged configuration for a specific group.
+
+    Args:
+        group_id: Group ID
+        base_config: Base configuration (if None, loads from config.yaml)
+        groups_path: Path to groups.json file
+
+    Returns:
+        Config instance with group settings merged
+
+    Raises:
+        ValueError: If group not found
+    """
+    if base_config is None:
+        base_config = get_config()
+
+    groups_data = load_groups(groups_path)
+    group = groups_data.get_group(group_id)
+
+    if group is None:
+        raise ValueError(f"Group not found: {group_id}")
+
+    return group.get_merged_config(base_config)

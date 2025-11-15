@@ -1,6 +1,6 @@
 -- Telegram Automation System - Database Schema
 -- SQLite database with WAL mode for concurrent access
--- Version: 1.0
+-- Version: 2.0 - Added support for campaign groups
 -- Date: 2024-11-15
 
 -- Enable WAL mode for better concurrency
@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS profiles (
 -- =====================================================
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_username TEXT UNIQUE NOT NULL,        -- @username чата
+    group_id TEXT NOT NULL,                    -- ID группы рассылки
+    chat_username TEXT NOT NULL,               -- @username чата
     status TEXT DEFAULT 'pending',             -- pending/in_progress/completed/blocked
     assigned_profile_id TEXT,                  -- Текущий обработчик (NULL если свободна)
 
@@ -51,12 +52,17 @@ CREATE TABLE IF NOT EXISTS tasks (
     last_attempt_at TIMESTAMP,                 -- Последняя попытка
     next_available_at TIMESTAMP,               -- Когда можно снова (для задержек)
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    -- Уникальность: один чат может быть в разных группах
+    UNIQUE(group_id, chat_username)
 );
 
+CREATE INDEX IF NOT EXISTS idx_tasks_group_id ON tasks(group_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_next_available ON tasks(next_available_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_is_blocked ON tasks(is_blocked);
+CREATE INDEX IF NOT EXISTS idx_tasks_group_status ON tasks(group_id, status);
 
 -- =====================================================
 -- Table: task_attempts
@@ -86,11 +92,15 @@ CREATE INDEX IF NOT EXISTS idx_attempts_timestamp ON task_attempts(timestamp);
 -- =====================================================
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id TEXT NOT NULL,                    -- ID группы рассылки
     text TEXT NOT NULL,                        -- Текст сообщения
     is_active BOOLEAN DEFAULT 1,               -- Используется ли в рассылке
     usage_count INTEGER DEFAULT 0,             -- Сколько раз использовано
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_messages_group_id ON messages(group_id);
+CREATE INDEX IF NOT EXISTS idx_messages_group_active ON messages(group_id, is_active);
 
 -- =====================================================
 -- Table: send_log
@@ -99,6 +109,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS send_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER,                           -- FK -> tasks.id (NULL если задача удалена)
+    group_id TEXT NOT NULL,                    -- ID группы рассылки
     profile_id TEXT NOT NULL,
     chat_username TEXT NOT NULL,
     message_text TEXT,
@@ -110,9 +121,33 @@ CREATE TABLE IF NOT EXISTS send_log (
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_send_log_group_id ON send_log(group_id);
 CREATE INDEX IF NOT EXISTS idx_send_log_status ON send_log(status);
 CREATE INDEX IF NOT EXISTS idx_send_log_timestamp ON send_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_send_log_chat ON send_log(chat_username);
+CREATE INDEX IF NOT EXISTS idx_send_log_profile_time ON send_log(profile_id, timestamp);
+
+-- =====================================================
+-- Table: profile_daily_stats
+-- Статистика отправленных сообщений по профилям за день
+-- Используется для отслеживания активности профилей
+-- =====================================================
+CREATE TABLE IF NOT EXISTS profile_daily_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id TEXT NOT NULL,
+    date DATE NOT NULL,                        -- Дата (YYYY-MM-DD)
+    messages_sent INTEGER DEFAULT 0,           -- Отправлено сообщений за день
+    successful_sends INTEGER DEFAULT 0,        -- Успешных отправок
+    failed_sends INTEGER DEFAULT 0,            -- Неудачных отправок
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    UNIQUE(profile_id, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_profile_daily_stats_profile ON profile_daily_stats(profile_id);
+CREATE INDEX IF NOT EXISTS idx_profile_daily_stats_date ON profile_daily_stats(date);
+CREATE INDEX IF NOT EXISTS idx_profile_daily_stats_profile_date ON profile_daily_stats(profile_id, date);
 
 -- =====================================================
 -- Table: screenshots
@@ -137,7 +172,7 @@ CREATE INDEX IF NOT EXISTS idx_screenshots_created ON screenshots(created_at);
 -- Views для удобного доступа к данным
 -- =====================================================
 
--- Статистика по профилям
+-- Статистика по профилям (общая)
 CREATE VIEW IF NOT EXISTS profile_stats AS
 SELECT
     p.profile_id,
@@ -155,6 +190,7 @@ GROUP BY p.profile_id, p.profile_name, p.is_active, p.is_blocked, p.last_message
 -- Прогресс по задачам
 CREATE VIEW IF NOT EXISTS task_progress AS
 SELECT
+    t.group_id,
     t.chat_username,
     t.status,
     t.completed_cycles,
@@ -165,6 +201,21 @@ SELECT
     t.last_attempt_at,
     t.assigned_profile_id
 FROM tasks t;
+
+-- Статистика по группам
+CREATE VIEW IF NOT EXISTS group_stats AS
+SELECT
+    t.group_id,
+    COUNT(*) as total_tasks,
+    SUM(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) as pending_tasks,
+    SUM(CASE WHEN t.status = 'in_progress' THEN 1 ELSE 0 END) as in_progress_tasks,
+    SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
+    SUM(CASE WHEN t.is_blocked = 1 THEN 1 ELSE 0 END) as blocked_tasks,
+    SUM(t.success_count) as total_successful_sends,
+    SUM(t.failed_count) as total_failed_sends,
+    (SELECT COUNT(*) FROM messages m WHERE m.group_id = t.group_id AND m.is_active = 1) as message_templates_count
+FROM tasks t
+GROUP BY t.group_id;
 
 -- =====================================================
 -- Initial data / примеры (опционально)

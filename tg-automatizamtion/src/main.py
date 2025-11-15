@@ -12,7 +12,7 @@ import signal
 from pathlib import Path
 from typing import List, Optional
 
-from .config import load_config, create_default_config, get_config
+from .config import load_config, create_default_config, get_config, load_groups
 from .database import init_database, get_database
 from .logger import init_logger, get_logger
 from .profile_manager import init_profile_manager, get_profile_manager
@@ -22,25 +22,28 @@ from .task_queue import get_task_queue
 class WorkerManager:
     """Manages multiple worker processes."""
 
-    def __init__(self, profile_ids: List[str]):
+    def __init__(self, profile_ids: List[str], group_id: str):
         """
         Initialize worker manager.
 
         Args:
             profile_ids: List of profile UUIDs to run as workers
+            group_id: Campaign group ID
         """
         self.profile_ids = profile_ids
+        self.group_id = group_id
         self.workers = {}  # profile_id -> Process
         self.stop_requested = False
 
     async def start_worker(self, profile_id: str):
         """Start worker process for profile."""
         logger = get_logger()
-        logger.info(f"Starting worker for profile: {profile_id}")
+        logger.info(f"Starting worker for profile: {profile_id}, group: {self.group_id}")
 
         process = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "src.worker",
             "--profile-id", profile_id,
+            "--group-id", self.group_id,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -234,8 +237,25 @@ def cmd_list_profiles(args):
 
 def cmd_start(args):
     """Start automation with workers."""
+    # Load groups
+    try:
+        groups_data = load_groups()
+    except FileNotFoundError:
+        print("Error: No groups file found. Create groups first with 'python scripts/manage_groups.py'", file=sys.stderr)
+        sys.exit(1)
+
+    # Get group
+    group = groups_data.get_group(args.group)
+    if not group:
+        print(f"Error: Group '{args.group}' not found.", file=sys.stderr)
+        sys.exit(1)
+
     # Load config and init
     config = load_config(args.config)
+
+    # Merge group settings with base config
+    config = group.get_merged_config(config)
+
     db = init_database(config.database.path)
     logger = init_logger(
         log_dir="logs",
@@ -245,17 +265,39 @@ def cmd_start(args):
     init_profile_manager()
     task_queue = get_task_queue()
 
-    # Reset any stale tasks from previous crashes
-    logger.info("Resetting stale tasks from previous runs...")
-    stale_count = task_queue.reset_stale_tasks()
+    # Reset any stale tasks from previous crashes (for this group)
+    logger.info(f"Resetting stale tasks for group '{args.group}'...")
+    stale_count = task_queue.reset_stale_tasks(group_id=args.group)
     if stale_count > 0:
         logger.info(f"Reset {stale_count} stale tasks")
 
-    # Get active profiles
-    profiles = db.get_active_profiles()
+    # Get profiles for this group
+    if args.all_profiles:
+        # Use all active profiles from database
+        profiles = db.get_active_profiles()
+        logger.info(f"Using all available profiles (--all-profiles flag)")
+    else:
+        # Use profiles from group configuration
+        profile_manager = get_profile_manager()
+        profiles = []
+        for profile_identifier in group.profiles:
+            # Try to find by UUID first, then by name
+            profile = profile_manager.get_profile_by_id(profile_identifier)
+            if not profile:
+                profile = profile_manager.get_profile_by_name(profile_identifier)
+
+            if profile:
+                # Check if profile is in database and active
+                db_profile = db.get_profile_by_id(profile.profile_id)
+                if db_profile and db_profile.get('is_active', True):
+                    profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
+                else:
+                    logger.warning(f"Profile {profile.profile_name} ({profile.profile_id}) not in database or inactive")
+            else:
+                logger.warning(f"Profile '{profile_identifier}' from group not found in Donut Browser")
 
     if not profiles:
-        print("Error: No active profiles. Add profiles first with 'add-profile' command.", file=sys.stderr)
+        print(f"Error: No active profiles for group '{args.group}'.", file=sys.stderr)
         sys.exit(1)
 
     # Limit workers if specified
@@ -264,11 +306,14 @@ def cmd_start(args):
 
     profile_ids = [p['profile_id'] for p in profiles]
 
-    print(f"\nStarting automation with {len(profile_ids)} worker(s)...")
-    print(f"Profiles: {', '.join([p['profile_name'] for p in profiles])}\n")
+    print(f"\n╔══════════════════════════════════════════════════════════════╗")
+    print(f"║  Starting automation for group: {args.group:<31}║")
+    print(f"║  Workers: {len(profile_ids):<52}║")
+    print(f"╚══════════════════════════════════════════════════════════════╝")
+    print(f"\nProfiles: {', '.join([p['profile_name'] for p in profiles])}\n")
 
     # Create worker manager
-    manager = WorkerManager(profile_ids)
+    manager = WorkerManager(profile_ids, args.group)
 
     # Setup signal handler for graceful shutdown
     def signal_handler(sig, frame):
@@ -372,7 +417,9 @@ def main():
 
     # start command
     parser_start = subparsers.add_parser('start', help='Start automation')
-    parser_start.add_argument('--workers', type=int, help='Number of workers (default: all active profiles)')
+    parser_start.add_argument('--group', type=str, required=True, help='Campaign group ID to run')
+    parser_start.add_argument('--workers', type=int, help='Number of workers (default: all group profiles)')
+    parser_start.add_argument('--all-profiles', action='store_true', help='Use all available profiles instead of group profiles')
 
     # status command
     parser_status = subparsers.add_parser('status', help='Show automation status')
