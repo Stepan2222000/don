@@ -165,6 +165,11 @@ class WorkerManager:
 
         # Auto-restart loop
         while True:
+            # Check if shutdown requested before any restart logic
+            if self.stop_requested:
+                logger.info(f"Shutdown requested, stopping monitor for worker {profile_id}")
+                break
+
             # Wait for process to complete
             stdout, stderr = await current_process.communicate()
             exit_code = current_process.returncode
@@ -229,6 +234,9 @@ class WorkerManager:
         """Stop all workers."""
         logger = get_logger()
         logger.info("Stopping all workers...")
+
+        # Set stop flag to prevent auto-restart
+        self.stop_requested = True
 
         for profile_id, process in self.workers.items():
             if process.returncode is None:  # Still running
@@ -478,20 +486,12 @@ def cmd_start(args):
     # Create worker manager
     manager = WorkerManager(profile_ids, args.group)
 
-    # Setup signal handler for graceful shutdown
-    def signal_handler(sig, frame):
-        print("\n\nShutdown requested (Ctrl+C)...")
-        manager.stop_requested = True
-        # Don't create task here - will cause RuntimeError
-        # The KeyboardInterrupt will be raised and handled below
-
-    signal.signal(signal.SIGINT, signal_handler)
-
     # Run workers
     try:
         asyncio.run(manager.start_all())
     except KeyboardInterrupt:
-        print("\nAutomation stopped by user")
+        print("\n\nShutdown requested (Ctrl+C)...")
+        print("Stopping all workers gracefully...")
         # Graceful shutdown of workers
         asyncio.run(manager.stop_all())
     except Exception as e:
