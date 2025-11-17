@@ -48,7 +48,8 @@ class WorkerManager:
             "--profile-id", profile_id,
             "--group-id", self.group_id,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
+            cwd=PROJECT_ROOT
         )
 
         self.workers[profile_id] = process

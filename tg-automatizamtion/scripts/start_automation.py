@@ -94,10 +94,23 @@ def start_group(group_id: str, workers: int = None, all_profiles: bool = False):
             if profile:
                 # Check if profile is in database and active
                 db_profile = db.get_profile_by_id(profile.profile_id)
-                if db_profile and db_profile.get('is_active', True):
-                    profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
+
+                if db_profile:
+                    # Profile exists in database
+                    if db_profile.get('is_active', True):
+                        profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
+                    else:
+                        logger.warning(f"Profile {profile.profile_name} ({profile.profile_id}) is inactive in database")
                 else:
-                    logger.warning(f"Profile {profile.profile_name} ({profile.profile_id}) not in database or inactive")
+                    # Profile not in database - add it automatically
+                    logger.info(f"Auto-adding profile to database: {profile.profile_name}")
+                    try:
+                        profile_manager.validate_profile(profile)
+                        db.add_profile(profile.profile_id, profile.profile_name)
+                        profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
+                        logger.info(f"✓ Profile added: {profile.profile_name} ({profile.profile_id})")
+                    except ValueError as e:
+                        logger.error(f"Failed to add profile {profile.profile_name}: {e}")
             else:
                 logger.warning(f"Profile '{profile_identifier}' from group not found in Donut Browser")
 
