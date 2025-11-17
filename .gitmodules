@@ -1,0 +1,3 @@
+[submodule "donutbrowser"]
+	path = donutbrowser
+	url = https://github.com/zhom/donutbrowser.git
