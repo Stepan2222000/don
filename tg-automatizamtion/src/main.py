@@ -9,6 +9,7 @@ import sys
 import json
 import asyncio
 import signal
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -38,8 +39,25 @@ class WorkerManager:
         self.workers = {}  # profile_id -> Process
         self.stop_requested = False
 
-    async def start_worker(self, profile_id: str):
-        """Start worker process for profile."""
+        # Auto-restart configuration
+        self.restart_counts = {}  # profile_id -> current restart count
+        self.last_restart_times = {}  # profile_id -> timestamp of last restart
+        self.max_restart_attempts = 5  # Maximum restart attempts before giving up
+        self.restart_delay = 30  # Base delay in seconds (exponential backoff)
+        self.restart_cooldown = 3600  # Reset restart count after 1 hour of stable work
+
+    async def start_single_worker(self, profile_id: str):
+        """
+        Start a single worker process for profile.
+
+        This is the core worker launch logic, used by both initial start and restart.
+
+        Args:
+            profile_id: Profile UUID
+
+        Returns:
+            Process object
+        """
         logger = get_logger()
         logger.info(f"Starting worker for profile: {profile_id}, group: {self.group_id}")
 
@@ -55,18 +73,146 @@ class WorkerManager:
         self.workers[profile_id] = process
         return process
 
-    async def monitor_worker(self, profile_id: str, process):
-        """Monitor worker and handle exit."""
+    async def start_worker(self, profile_id: str):
+        """
+        Start worker process for profile (wrapper for start_single_worker).
+
+        Args:
+            profile_id: Profile UUID
+
+        Returns:
+            Process object
+        """
+        return await self.start_single_worker(profile_id)
+
+    def _should_restart_worker(self, profile_id: str, exit_code: int) -> bool:
+        """
+        Determine if worker should be restarted based on exit code and restart history.
+
+        Args:
+            profile_id: Profile UUID
+            exit_code: Process exit code
+
+        Returns:
+            True if worker should be restarted, False otherwise
+        """
         logger = get_logger()
 
-        stdout, stderr = await process.communicate()
+        # Don't restart if shutdown requested
+        if self.stop_requested:
+            logger.debug(f"Not restarting worker {profile_id}: shutdown requested")
+            return False
 
-        if process.returncode != 0:
-            logger.error(f"Worker {profile_id} exited with code {process.returncode}")
-            if stderr:
-                logger.error(f"Worker {profile_id} stderr: {stderr.decode()}")
-        else:
-            logger.info(f"Worker {profile_id} finished successfully")
+        # Don't restart on success (exit code 0)
+        if exit_code == 0:
+            logger.debug(f"Not restarting worker {profile_id}: completed successfully (exit code 0)")
+            return False
+
+        # Don't restart on banned account (exit code 3)
+        if exit_code == 3:
+            logger.warning(f"Not restarting worker {profile_id}: account banned (exit code 3)")
+            return False
+
+        # Check restart cooldown period
+        current_time = time.time()
+        last_restart_time = self.last_restart_times.get(profile_id, 0)
+        time_since_last_restart = current_time - last_restart_time
+
+        # Reset restart count if enough time has passed (stable work)
+        if time_since_last_restart > self.restart_cooldown:
+            logger.debug(f"Resetting restart count for {profile_id} (stable work for {time_since_last_restart:.0f}s)")
+            self.restart_counts[profile_id] = 0
+
+        # Get current restart count
+        restart_count = self.restart_counts.get(profile_id, 0)
+
+        # Check if restart limit exceeded
+        if restart_count >= self.max_restart_attempts:
+            logger.error(
+                f"Not restarting worker {profile_id}: restart limit exceeded "
+                f"({restart_count}/{self.max_restart_attempts})"
+            )
+            return False
+
+        # Can restart
+        logger.info(f"Worker {profile_id} will be restarted (attempt {restart_count + 1}/{self.max_restart_attempts})")
+        return True
+
+    def _calculate_restart_delay(self, attempt: int) -> int:
+        """
+        Calculate restart delay with exponential backoff.
+
+        Args:
+            attempt: Current restart attempt number (0-indexed)
+
+        Returns:
+            Delay in seconds
+        """
+        # Exponential backoff: 30s, 60s, 120s, 240s, 300s (capped at 5 minutes)
+        delay = min(self.restart_delay * (2 ** attempt), 300)
+        return delay
+
+    async def monitor_worker(self, profile_id: str, process):
+        """
+        Monitor worker and handle exit with auto-restart logic.
+
+        Args:
+            profile_id: Profile UUID
+            process: Initial process object
+        """
+        logger = get_logger()
+        current_process = process
+
+        # Auto-restart loop
+        while True:
+            # Wait for process to complete
+            stdout, stderr = await current_process.communicate()
+            exit_code = current_process.returncode
+
+            # Log exit
+            if exit_code != 0:
+                logger.error(f"Worker {profile_id} exited with code {exit_code}")
+                if stderr:
+                    stderr_text = stderr.decode().strip()
+                    if stderr_text:
+                        logger.error(f"Worker {profile_id} stderr:\n{stderr_text}")
+            else:
+                logger.info(f"Worker {profile_id} finished successfully")
+
+            # Check if should restart
+            if not self._should_restart_worker(profile_id, exit_code):
+                # Don't restart - exit monitor loop
+                break
+
+            # Get current restart count
+            restart_count = self.restart_counts.get(profile_id, 0)
+
+            # Calculate delay with exponential backoff
+            delay = self._calculate_restart_delay(restart_count)
+            logger.info(f"Restarting worker {profile_id} in {delay}s (attempt {restart_count + 1}/{self.max_restart_attempts})")
+
+            # Wait before restart
+            await asyncio.sleep(delay)
+
+            # Check if shutdown was requested during delay
+            if self.stop_requested:
+                logger.info(f"Shutdown requested, not restarting worker {profile_id}")
+                break
+
+            # Increment restart count and update timestamp
+            self.restart_counts[profile_id] = restart_count + 1
+            self.last_restart_times[profile_id] = time.time()
+
+            # Restart worker
+            try:
+                logger.info(f"Restarting worker {profile_id}...")
+                current_process = await self.start_single_worker(profile_id)
+            except Exception as e:
+                logger.error(f"Failed to restart worker {profile_id}: {e}")
+                break
+
+        # Worker monitor loop exited
+        logger.info(f"Monitor stopped for worker {profile_id}")
 
     async def start_all(self):
         """Start all workers."""
@@ -113,8 +259,8 @@ def cmd_init(args):
     config = load_config()
 
     # Initialize database
-    print(f"Initializing database: {config.database.path}")
-    init_database(config.database.path)
+    print(f"Initializing database: {config.database.absolute_path}")
+    init_database(config.database.absolute_path)
 
     print("\n✓ Initialization complete!")
     print("\nNext steps:")
@@ -135,7 +281,7 @@ def cmd_import_chats(args):
 
     # Load config and init
     config = load_config(args.config)
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
 
     # Read chats from file
     chats = []
@@ -166,7 +312,7 @@ def cmd_import_messages(args):
 
     # Load config and init
     config = load_config(args.config)
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
 
     # Read messages from JSON
     with open(messages_file, 'r', encoding='utf-8') as f:
@@ -191,7 +337,7 @@ def cmd_add_profile(args):
     """Add profile to automation."""
     # Load config and init
     config = load_config(args.config)
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
     profile_manager = init_profile_manager()
 
     # Get profile by name or ID
@@ -220,7 +366,7 @@ def cmd_list_profiles(args):
     if args.db_only:
         # List profiles in database
         config = load_config(args.config)
-        db = init_database(config.database.path)
+        db = init_database(config.database.absolute_path)
         profiles = db.get_active_profiles()
 
         print(f"\nProfiles in database ({len(profiles)}):\n")
@@ -260,7 +406,7 @@ def cmd_start(args):
     # Merge group settings with base config
     config = group.get_merged_config(config)
 
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
     logger = init_logger(
         log_dir="logs",
         level=config.logging.level,
@@ -360,7 +506,7 @@ def cmd_status(args):
     # Load config and init
     config = load_config(args.config)
     init_logger(level=config.logging.level, log_format=config.logging.format)
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
     task_queue = get_task_queue()
 
     # Get queue stats

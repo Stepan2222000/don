@@ -64,7 +64,7 @@ def load_tasks(group_id: str, file_path: str):
         print("Error: config.yaml not found. Run: python -m src.main init")
         return
 
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
 
     # Import chats into database
     count = db.import_chats(group_id, chats, total_cycles=1)
@@ -99,7 +99,7 @@ def clear_tasks(group_id: str, skip_confirm: bool = False):
         print("Error: config.yaml not found. Run: python -m src.main init")
         return
 
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
 
     # Clear tasks
     db.clear_group_tasks(group_id)
@@ -127,7 +127,7 @@ def show_stats(group_id: str):
         print("Error: config.yaml not found. Run: python -m src.main init")
         return
 
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
 
     # Get stats
     stats = db.get_group_stats(group_id)

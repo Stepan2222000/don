@@ -75,6 +75,15 @@ class DatabaseConfig:
     path: str = "db/telegram_automation.db"
     wal_mode: bool = True
 
+    @property
+    def absolute_path(self) -> str:
+        """Get absolute path to database file, resolved from PROJECT_ROOT."""
+        db_path = Path(self.path)
+        if db_path.is_absolute():
+            return str(db_path)
+        # Resolve relative path from PROJECT_ROOT
+        return str(PROJECT_ROOT / db_path)
+
 
 @dataclass
 class Config:

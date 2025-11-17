@@ -48,6 +48,10 @@ class Worker:
         # Track current task for cleanup on interruption
         self.current_task_id = None
 
+        # Track exit status
+        self.exit_code = 0  # 0 = success, 1 = error
+        self.exit_reason = "completed"  # Reason for exit
+
     def run(self):
         """
         Main worker loop.
@@ -119,8 +123,12 @@ class Worker:
 
         except KeyboardInterrupt:
             self.logger.warning("Worker interrupted by user (Ctrl+C)")
+            self.exit_code = 0  # Graceful shutdown
+            self.exit_reason = "interrupted"
         except Exception as e:
             self.logger.log_worker_error(self.profile.profile_name, e)
+            self.exit_code = 1  # Error exit
+            self.exit_reason = "error"
         finally:
             # Cleanup current task if interrupted
             if self.current_task_id is not None:
@@ -144,8 +152,10 @@ class Worker:
             self.logger.log_worker_stop(
                 self.profile.profile_name,
                 self.profile.profile_id,
-                reason="completed"
+                reason=self.exit_reason
             )
+
+        return self.exit_code
 
     def _process_task(self, task: dict) -> Optional[bool]:
         """
@@ -269,7 +279,7 @@ def main():
         config = load_config(args.config)
 
         # Initialize database
-        init_database(config.database.path)
+        init_database(config.database.absolute_path)
 
         # Initialize logger
         init_logger(
@@ -298,7 +308,8 @@ def main():
 
         # Create and run worker
         worker = Worker(profile, args.group_id, use_simplified=args.simplified)
-        worker.run()
+        exit_code = worker.run()
+        sys.exit(exit_code)
 
     except KeyboardInterrupt:
         print("\nWorker stopped by user")

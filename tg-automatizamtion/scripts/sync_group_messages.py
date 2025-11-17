@@ -50,7 +50,7 @@ def sync_messages(group_id: str):
         print("Error: config.yaml not found. Run: python -m src.main init")
         return False
 
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
 
     # Clear existing messages for this group
     db.clear_group_messages(group_id)

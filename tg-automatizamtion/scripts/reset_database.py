@@ -53,7 +53,7 @@ def reset_database(skip_confirm: bool = False):
         print("Error: config.yaml not found. Please create it first.")
         return False
 
-    db_path = Path(config.database.path)
+    db_path = Path(config.database.absolute_path)
     schema_path = DEFAULT_SCHEMA_PATH
 
     if not schema_path.exists():

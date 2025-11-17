@@ -35,7 +35,7 @@ def show_all_stats(days: int = 1):
         print("Error: config.yaml not found. Run: python -m src.main init")
         return
 
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
 
     # Get stats
     stats = db.get_all_profiles_daily_stats(days=days)
@@ -82,7 +82,7 @@ def show_profile_stats(profile_name: str, days: int = 7):
         print("Error: config.yaml not found. Run: python -m src.main init")
         return
 
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
 
     # Get stats
     stats = db.get_profile_daily_stats(profile.profile_id, days=days)

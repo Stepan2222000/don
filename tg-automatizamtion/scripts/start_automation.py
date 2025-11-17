@@ -61,7 +61,7 @@ def start_group(group_id: str, workers: int = None, all_profiles: bool = False):
     # Merge group settings with base config
     config = group.get_merged_config(config)
 
-    db = init_database(config.database.path)
+    db = init_database(config.database.absolute_path)
     logger = init_logger(
         log_dir="logs",
         level=config.logging.level,
