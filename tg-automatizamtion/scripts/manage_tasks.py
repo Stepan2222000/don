@@ -26,6 +26,10 @@ from interactive_utils import (
     show_groups, validate_file_exists, validate_group_exists, confirm
 )
 
+# Determine project root and data path
+PROJECT_ROOT = Path(__file__).parent.parent
+DEFAULT_CHATS_FILE = PROJECT_ROOT / "data" / "chats.txt"
+
 
 def load_tasks(group_id: str, file_path: str):
     """Load tasks from file into group."""
@@ -173,7 +177,7 @@ def interactive_mode():
             validator=validate_group_exists
         )
         # Always use data/chats.txt
-        file_path = "data/chats.txt"
+        file_path = str(DEFAULT_CHATS_FILE)
         print(f"Используется файл: {file_path}")
         load_tasks(group_id, file_path)
 

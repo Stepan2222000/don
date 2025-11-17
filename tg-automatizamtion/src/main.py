@@ -12,11 +12,14 @@ import signal
 from pathlib import Path
 from typing import List, Optional
 
-from .config import load_config, create_default_config, get_config, load_groups
+from .config import load_config, create_default_config, get_config, load_groups, DEFAULT_CONFIG_PATH
 from .database import init_database, get_database
 from .logger import init_logger, get_logger
 from .profile_manager import init_profile_manager, get_profile_manager
 from .task_queue import get_task_queue
+
+# Project root is parent of src/
+PROJECT_ROOT = Path(__file__).parent.parent
 
 
 class WorkerManager:
@@ -98,7 +101,7 @@ def cmd_init(args):
     print("Initializing Telegram Automation System...")
 
     # Create default config if doesn't exist
-    config_path = Path("config.yaml")
+    config_path = Path(DEFAULT_CONFIG_PATH)
     if not config_path.exists():
         print(f"Creating default configuration: {config_path}")
         create_default_config()
@@ -289,10 +292,23 @@ def cmd_start(args):
             if profile:
                 # Check if profile is in database and active
                 db_profile = db.get_profile_by_id(profile.profile_id)
-                if db_profile and db_profile.get('is_active', True):
-                    profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
+
+                if db_profile:
+                    # Profile exists in database
+                    if db_profile.get('is_active', True):
+                        profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
+                    else:
+                        logger.warning(f"Profile {profile.profile_name} ({profile.profile_id}) is inactive in database")
                 else:
-                    logger.warning(f"Profile {profile.profile_name} ({profile.profile_id}) not in database or inactive")
+                    # Profile not in database - add it automatically
+                    logger.info(f"Auto-adding profile to database: {profile.profile_name}")
+                    try:
+                        profile_manager.validate_profile(profile)
+                        db.add_profile(profile.profile_id, profile.profile_name)
+                        profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
+                        logger.info(f"✓ Profile added: {profile.profile_name} ({profile.profile_id})")
+                    except ValueError as e:
+                        logger.error(f"Failed to add profile {profile.profile_name}: {e}")
             else:
                 logger.warning(f"Profile '{profile_identifier}' from group not found in Donut Browser")
 
@@ -390,8 +406,8 @@ def main():
 
     parser.add_argument(
         '--config',
-        default='config.yaml',
-        help="Path to config.yaml file (default: config.yaml)"
+        default=None,
+        help="Path to config.yaml file (default: auto-detected)"
     )
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')

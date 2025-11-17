@@ -14,11 +14,15 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
+# Determine project root directory (parent of src/)
+PROJECT_ROOT = Path(__file__).parent.parent
+DEFAULT_LOG_DIR = PROJECT_ROOT / "logs"
+
 
 class TelegramAutomationLogger:
     """Multi-file logger for Telegram automation."""
 
-    def __init__(self, log_dir: str = "logs", level: str = "INFO", log_format: Optional[str] = None):
+    def __init__(self, log_dir: str = None, level: str = "INFO", log_format: Optional[str] = None):
         """
         Initialize logger with multiple handlers.
 
@@ -27,6 +31,8 @@ class TelegramAutomationLogger:
             level: Logging level (DEBUG, INFO, WARNING, ERROR)
             log_format: Log message format
         """
+        if log_dir is None:
+            log_dir = str(DEFAULT_LOG_DIR)
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -243,8 +249,10 @@ def get_logger() -> TelegramAutomationLogger:
     return _logger_instance
 
 
-def init_logger(log_dir: str = "logs", level: str = "INFO", log_format: Optional[str] = None) -> TelegramAutomationLogger:
+def init_logger(log_dir: str = None, level: str = "INFO", log_format: Optional[str] = None) -> TelegramAutomationLogger:
     """Initialize global logger instance."""
     global _logger_instance
+    if log_dir is None:
+        log_dir = str(DEFAULT_LOG_DIR)
     _logger_instance = TelegramAutomationLogger(log_dir, level, log_format)
     return _logger_instance

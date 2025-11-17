@@ -32,9 +32,19 @@ from interactive_utils import (
     validate_not_empty, get_multiline_input, confirm
 )
 
+# Determine project root and data path
+PROJECT_ROOT = Path(__file__).parent.parent
+DEFAULT_GROUPS_PATH = PROJECT_ROOT / "data" / "groups.json"
 
-def create_group(group_id: str, groups_path: str = "data/groups.json"):
+
+def get_groups_path(groups_path=None):
+    """Get groups file path, using default if not specified."""
+    return str(groups_path if groups_path else DEFAULT_GROUPS_PATH)
+
+
+def create_group(group_id: str, groups_path=None):
     """Create a new campaign group."""
+    groups_path = get_groups_path(groups_path)
     try:
         groups_data = load_groups(groups_path)
     except FileNotFoundError:
@@ -54,8 +64,9 @@ def create_group(group_id: str, groups_path: str = "data/groups.json"):
     return True
 
 
-def list_groups(groups_path: str = "data/groups.json"):
+def list_groups(groups_path=None):
     """List all campaign groups."""
+    groups_path = get_groups_path(groups_path)
     try:
         groups_data = load_groups(groups_path)
     except FileNotFoundError:
@@ -78,8 +89,9 @@ def list_groups(groups_path: str = "data/groups.json"):
                 print(f"    - {key}: {value}")
 
 
-def show_group(group_id: str, groups_path: str = "data/groups.json"):
+def show_group(group_id: str, groups_path=None):
     """Show detailed information about a group."""
+    groups_path = get_groups_path(groups_path)
     try:
         groups_data = load_groups(groups_path)
     except FileNotFoundError:
@@ -115,8 +127,9 @@ def show_group(group_id: str, groups_path: str = "data/groups.json"):
         print("  (none - using defaults from config.yaml)")
 
 
-def delete_group(group_id: str, groups_path: str = "data/groups.json"):
+def delete_group(group_id: str, groups_path=None):
     """Delete a campaign group."""
+    groups_path = get_groups_path(groups_path)
     try:
         groups_data = load_groups(groups_path)
     except FileNotFoundError:
@@ -131,8 +144,9 @@ def delete_group(group_id: str, groups_path: str = "data/groups.json"):
         print(f"Error: Group '{group_id}' not found.")
 
 
-def add_profiles(group_id: str, profile_names: list, groups_path: str = "data/groups.json"):
+def add_profiles(group_id: str, profile_names: list, groups_path=None):
     """Add profiles to a group."""
+    groups_path = get_groups_path(groups_path)
     try:
         groups_data = load_groups(groups_path)
     except FileNotFoundError:
@@ -164,8 +178,9 @@ def add_profiles(group_id: str, profile_names: list, groups_path: str = "data/gr
         print(f"\n✓ Added {added} profile(s) to group {group_id}")
 
 
-def add_messages(group_id: str, messages: list, groups_path: str = "data/groups.json"):
+def add_messages(group_id: str, messages: list, groups_path=None):
     """Add messages to a group."""
+    groups_path = get_groups_path(groups_path)
     try:
         groups_data = load_groups(groups_path)
     except FileNotFoundError:
@@ -187,8 +202,9 @@ def add_messages(group_id: str, messages: list, groups_path: str = "data/groups.
     print(f"\n✓ Added {len(messages)} message(s) to group {group_id}")
 
 
-def set_setting(group_id: str, key: str, value: str, groups_path: str = "data/groups.json"):
+def set_setting(group_id: str, key: str, value: str, groups_path=None):
     """Set a custom setting for a group."""
+    groups_path = get_groups_path(groups_path)
     try:
         groups_data = load_groups(groups_path)
     except FileNotFoundError:

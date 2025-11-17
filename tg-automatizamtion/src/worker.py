@@ -10,7 +10,7 @@ import argparse
 import sys
 from typing import Optional
 
-from .config import load_config, get_config
+from .config import load_config, get_config, DEFAULT_CONFIG_PATH
 from .database import init_database, get_database
 from .logger import init_logger, get_logger
 from .profile_manager import get_profile_manager, init_profile_manager, DonutProfile
@@ -268,8 +268,8 @@ def main():
     )
     parser.add_argument(
         '--config',
-        default='config.yaml',
-        help="Path to config.yaml file"
+        default=None,
+        help="Path to config.yaml file (default: auto-detected)"
     )
     parser.add_argument(
         '--simplified',

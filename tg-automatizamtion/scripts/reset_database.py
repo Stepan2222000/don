@@ -21,6 +21,10 @@ from src.config import load_config
 import sqlite3
 from interactive_utils import show_header, confirm
 
+# Determine project root and paths
+PROJECT_ROOT = Path(__file__).parent.parent
+DEFAULT_SCHEMA_PATH = PROJECT_ROOT / "db" / "schema.sql"
+
 def reset_database(skip_confirm: bool = False):
     """Delete and recreate database with new schema."""
     if not skip_confirm:
@@ -50,7 +54,7 @@ def reset_database(skip_confirm: bool = False):
         return False
 
     db_path = Path(config.database.path)
-    schema_path = Path("db/schema.sql")
+    schema_path = DEFAULT_SCHEMA_PATH
 
     if not schema_path.exists():
         print(f"Error: Schema file not found: {schema_path}")

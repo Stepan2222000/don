@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
+# Determine project root directory (parent of src/)
+PROJECT_ROOT = Path(__file__).parent.parent
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+DEFAULT_GROUPS_PATH = PROJECT_ROOT / "data" / "groups.json"
+
 
 @dataclass
 class LimitsConfig:
@@ -96,7 +101,7 @@ class Config:
         )
 
     @classmethod
-    def load_from_file(cls, config_path: str = "config.yaml") -> 'Config':
+    def load_from_file(cls, config_path: str = None) -> 'Config':
         """
         Load configuration from YAML file.
 
@@ -110,6 +115,8 @@ class Config:
             FileNotFoundError: If config file doesn't exist
             yaml.YAMLError: If config file is invalid
         """
+        if config_path is None:
+            config_path = str(DEFAULT_CONFIG_PATH)
         config_file = Path(config_path)
 
         if not config_file.exists():
@@ -177,13 +184,15 @@ class Config:
             'database': self.database.__dict__
         }
 
-    def save_to_file(self, config_path: str = "config.yaml"):
+    def save_to_file(self, config_path: str = None):
         """
         Save configuration to YAML file.
 
         Args:
             config_path: Path to config.yaml file
         """
+        if config_path is None:
+            config_path = str(DEFAULT_CONFIG_PATH)
         with open(config_path, 'w', encoding='utf-8') as f:
             yaml.dump(self.to_dict(), f, default_flow_style=False, sort_keys=False)
 
@@ -200,16 +209,20 @@ def get_config() -> Config:
     return _config_instance
 
 
-def load_config(config_path: str = "config.yaml") -> Config:
+def load_config(config_path: str = None) -> Config:
     """Load and validate global configuration."""
     global _config_instance
+    if config_path is None:
+        config_path = str(DEFAULT_CONFIG_PATH)
     _config_instance = Config.load_from_file(config_path)
     _config_instance.validate()
     return _config_instance
 
 
-def create_default_config(config_path: str = "config.yaml"):
+def create_default_config(config_path: str = None):
     """Create default configuration file."""
+    if config_path is None:
+        config_path = str(DEFAULT_CONFIG_PATH)
     config = Config()
     config.save_to_file(config_path)
     return config
@@ -274,7 +287,7 @@ class GroupsData:
         return cls(groups=groups)
 
     @classmethod
-    def load_from_file(cls, groups_path: str = "data/groups.json") -> 'GroupsData':
+    def load_from_file(cls, groups_path: str = None) -> 'GroupsData':
         """
         Load groups from JSON file.
 
@@ -288,6 +301,8 @@ class GroupsData:
             FileNotFoundError: If groups file doesn't exist
             json.JSONDecodeError: If groups file is invalid
         """
+        if groups_path is None:
+            groups_path = str(DEFAULT_GROUPS_PATH)
         groups_file = Path(groups_path)
 
         if not groups_file.exists():
@@ -335,18 +350,22 @@ class GroupsData:
             ]
         }
 
-    def save_to_file(self, groups_path: str = "data/groups.json"):
+    def save_to_file(self, groups_path: str = None):
         """Save groups to JSON file."""
+        if groups_path is None:
+            groups_path = str(DEFAULT_GROUPS_PATH)
         with open(groups_path, 'w', encoding='utf-8') as f:
             json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
 
 
-def load_groups(groups_path: str = "data/groups.json") -> GroupsData:
+def load_groups(groups_path: str = None) -> GroupsData:
     """Load groups from JSON file."""
+    if groups_path is None:
+        groups_path = str(DEFAULT_GROUPS_PATH)
     return GroupsData.load_from_file(groups_path)
 
 
-def get_group_config(group_id: str, base_config: Optional[Config] = None, groups_path: str = "data/groups.json") -> Config:
+def get_group_config(group_id: str, base_config: Optional[Config] = None, groups_path: str = None) -> Config:
     """
     Get merged configuration for a specific group.
 
@@ -363,6 +382,9 @@ def get_group_config(group_id: str, base_config: Optional[Config] = None, groups
     """
     if base_config is None:
         base_config = get_config()
+
+    if groups_path is None:
+        groups_path = str(DEFAULT_GROUPS_PATH)
 
     groups_data = load_groups(groups_path)
     group = groups_data.get_group(group_id)
