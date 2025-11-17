@@ -82,23 +82,8 @@ class Worker:
                 page
             )
 
-            # Wait for Telegram to fully load and render
-            self.logger.info("Waiting for Telegram UI to load...")
-            time.sleep(10)
-
-            # Explicitly wait for search input to appear (ensures UI is rendered)
-            try:
-                self.telegram.page.wait_for_selector(
-                    "input.input-search-input",
-                    timeout=30000,
-                    state="visible"
-                )
-                self.logger.info("Telegram UI fully loaded and ready")
-            except Exception as e:
-                self.logger.warning(f"Telegram may not be fully loaded: {e}")
-                # Try to continue anyway - might be a different UI state
-                pass
-
+            # Browser automation now handles page loading and white page detection
+            # No additional checks needed here
             self.logger.info(f"Worker ready: {self.profile.profile_name}")
 
             # Main processing loop

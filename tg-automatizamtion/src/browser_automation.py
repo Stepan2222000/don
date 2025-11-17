@@ -17,6 +17,131 @@ from .profile_manager import DonutProfile
 from .logger import get_logger
 
 
+def _verify_telegram_loaded(page: Page, logger) -> tuple[bool, list[str]]:
+    """
+    Verify that Telegram UI has loaded properly.
+
+    Checks for presence AND visibility of critical UI elements to detect white/blank page.
+
+    Args:
+        page: Playwright Page object
+        logger: Logger instance
+
+    Returns:
+        Tuple of (is_loaded, missing_elements):
+            - is_loaded: True if all critical elements present and visible, False if white page
+            - missing_elements: List of descriptions of missing/invisible elements
+    """
+    missing_elements = []
+
+    # Critical elements that must be present on loaded Telegram page
+    # Based on analysis of tg-automatizamtion/htmls/main.html
+    elements_to_check = {
+        "#page-chats": "Main page container",
+        "#main-columns": "Main columns",
+        "input.input-search-input": "Search input field",
+    }
+
+    logger.debug("Verifying Telegram page loaded...")
+
+    for selector, description in elements_to_check.items():
+        locator = page.locator(selector)
+        element_count = locator.count()
+
+        # Check if element exists
+        if element_count == 0:
+            logger.debug(f"Checking {description} ({selector}): NOT FOUND")
+            missing_elements.append(f"{description} ({selector}) - not found")
+            continue
+
+        # Check if element is visible
+        is_visible = locator.first.is_visible()
+        logger.debug(f"Checking {description} ({selector}): {'VISIBLE' if is_visible else 'NOT VISIBLE'}")
+
+        if not is_visible:
+            missing_elements.append(f"{description} ({selector}) - not visible")
+
+    is_loaded = len(missing_elements) == 0
+
+    if is_loaded:
+        logger.debug("✓ All critical elements found and visible - Telegram loaded successfully")
+    else:
+        logger.warning(f"✗ White page detected - missing/invisible elements: {', '.join(missing_elements)}")
+
+    return is_loaded, missing_elements
+
+
+def _load_telegram_with_retry(page: Page, url: str, logger, max_retries: int = 3) -> None:
+    """
+    Load Telegram with retry logic and white page detection.
+
+    If white/blank page is detected, will reload the page and retry.
+    Takes screenshots of failed attempts for debugging.
+
+    Args:
+        page: Playwright Page object
+        url: URL to load (should be https://web.telegram.org/k)
+        logger: Logger instance
+        max_retries: Maximum number of reload attempts (default: 3)
+
+    Raises:
+        RuntimeError: If Telegram fails to load after all retry attempts
+    """
+    from pathlib import Path
+
+    for attempt in range(max_retries):
+        attempt_num = attempt + 1
+        logger.info(f"Loading Telegram (attempt {attempt_num}/{max_retries})...")
+
+        # Navigate to URL
+        page.goto(url, timeout=30000)
+
+        # Wait for page to load - multiple load states for reliability
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=30000)
+
+        # Additional wait for React to render UI (increased from 5s to 15s)
+        logger.debug("Waiting for React UI to render...")
+        page.wait_for_timeout(15000)
+
+        # Verify Telegram UI loaded (check for critical elements)
+        is_loaded, missing_elements = _verify_telegram_loaded(page, logger)
+
+        if is_loaded:
+            # Additional stabilization wait after successful check
+            logger.debug("Elements verified, waiting for UI stabilization...")
+            page.wait_for_timeout(5000)
+            logger.info(f"✓ Telegram loaded successfully on attempt {attempt_num}")
+            return
+
+        # White page detected
+        logger.warning(f"✗ White/blank page detected on attempt {attempt_num}/{max_retries}")
+        logger.warning(f"Missing elements: {', '.join(missing_elements)}")
+
+        # Save screenshot for debugging
+        try:
+            screenshot_dir = Path("logs/screenshots")
+            screenshot_dir.mkdir(parents=True, exist_ok=True)
+            screenshot_path = screenshot_dir / f"white_page_attempt_{attempt_num}.png"
+
+            page.screenshot(path=str(screenshot_path))
+            logger.info(f"Screenshot saved: {screenshot_path}")
+        except Exception as e:
+            logger.error(f"Failed to save screenshot: {e}")
+
+        # If not last attempt, reload and retry
+        if attempt_num < max_retries:
+            logger.info(f"Reloading page for retry {attempt_num + 1}...")
+            page.reload(timeout=30000)
+            page.wait_for_timeout(5000)
+        else:
+            # All attempts exhausted
+            raise RuntimeError(
+                f"Failed to load Telegram after {max_retries} attempts. "
+                f"White/blank page persists. Missing elements: {', '.join(missing_elements)}"
+            )
+
+
 class BrowserAutomation:
     """Browser automation using nodecar CLI and Playwright."""
 
@@ -121,16 +246,11 @@ class BrowserAutomation:
             else:
                 self.page = self.context.new_page()
 
-            # Navigate to URL if needed
+            # Navigate to URL with retry logic for white page detection
             if self.page.url != url:
                 logger.log_telegram_navigation(profile.profile_name)
-                self.page.goto(url, timeout=30000)
-                # Wait for page to load - multiple load states for reliability
-                self.page.wait_for_load_state("domcontentloaded", timeout=30000)
-                self.page.wait_for_load_state("networkidle", timeout=30000)
-                # Additional wait for React to render UI
-                logger.debug("Waiting for React UI to render...")
-                self.page.wait_for_timeout(5000)
+                # Use new retry logic with white page detection
+                _load_telegram_with_retry(self.page, url, logger, max_retries=3)
 
             logger.info(f"Browser launched successfully: {profile.profile_name}")
             return self.page
@@ -257,15 +377,10 @@ class BrowserAutomationSimplified:
         else:
             self.page = self.context.new_page()
 
-        # Navigate to URL
+        # Navigate to URL with retry logic for white page detection
         logger.log_telegram_navigation(profile.profile_name)
-        self.page.goto(url, timeout=30000)
-        # Wait for page to load - multiple load states for reliability
-        self.page.wait_for_load_state("domcontentloaded", timeout=30000)
-        self.page.wait_for_load_state("networkidle", timeout=30000)
-        # Additional wait for React to render UI
-        logger.debug("Waiting for React UI to render...")
-        self.page.wait_for_timeout(5000)
+        # Use new retry logic with white page detection
+        _load_telegram_with_retry(self.page, url, logger, max_retries=3)
 
         logger.info(f"Browser launched successfully: {profile.profile_name}")
         return self.page
