@@ -11,6 +11,7 @@ Handles 4 main error scenarios:
 from typing import Dict, Any, Optional
 from playwright.sync_api import Page
 
+from .config import get_config
 from .database import get_database
 from .logger import get_logger
 from .task_queue import get_task_queue
@@ -32,6 +33,7 @@ class ErrorHandler:
         self.profile_id = profile_id
         self.profile_name = profile_name
         self.page = page
+        self.config = get_config()
         self.db = get_database()
         self.logger = get_logger()
         self.task_queue = get_task_queue()
@@ -222,8 +224,8 @@ class ErrorHandler:
         1. Save screenshot
         2. Log error to main.log
         3. Record failed attempt
-        4. Increment completed cycles
-        5. Continue to next task (don't block)
+        4. Check retry limit - block if exceeded
+        5. Continue to next task or block permanently
 
         Args:
             task: Task dictionary
@@ -233,9 +235,28 @@ class ErrorHandler:
         error_type = type(exception).__name__
         error_message = str(exception)
 
-        self.logger.error(
-            f"Unexpected error for {chat_username}: {error_type}: {error_message}"
-        )
+        # Get current failed count and check if should block
+        current_failed_count = task.get('failed_count', 0)
+        max_attempts = self.config.retry.max_attempts_before_block
+        should_block = (current_failed_count + 1) >= max_attempts
+
+        if should_block:
+            self.logger.error(
+                f"Max retries exceeded for {chat_username} ({current_failed_count + 1}/{max_attempts}): "
+                f"{error_type}: {error_message}"
+            )
+            # Log to failed_chats.log
+            self.logger.log_blocked_after_retries(
+                self.profile_name,
+                chat_username,
+                current_failed_count + 1,
+                f"{error_type}: {error_message}"
+            )
+        else:
+            self.logger.error(
+                f"Unexpected error for {chat_username} (attempt {current_failed_count + 1}/{max_attempts}): "
+                f"{error_type}: {error_message}"
+            )
 
         # Save screenshot (error level)
         screenshot_path = self.telegram.save_screenshot(
@@ -262,16 +283,20 @@ class ErrorHandler:
                 description=f"Unexpected error: {chat_username} - {error_type}"
             )
 
-        # Mark as failed but don't block (might work in next attempt)
+        # Mark as failed and block if retry limit exceeded
         self.task_queue.mark_task_failed(
             task_id=task['id'],
             profile_id=self.profile_id,
             error_type='exception',
             error_message=f"{error_type}: {error_message}",
-            should_block=False
+            should_block=should_block,
+            block_reason='max_retries_exceeded' if should_block else None
         )
 
-        self.logger.debug(f"Task failed (exception): {chat_username}")
+        if should_block:
+            self.logger.info(f"Task blocked after {max_attempts} failed attempts: {chat_username}")
+        else:
+            self.logger.debug(f"Task failed (exception): {chat_username}")
 
     def handle_network_timeout(
         self,

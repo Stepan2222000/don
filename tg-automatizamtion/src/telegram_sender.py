@@ -53,6 +53,70 @@ class TelegramSender:
         self.config = get_config()
         self.logger = get_logger()
 
+    def click_with_retry(
+        self,
+        locator,
+        element_name: str,
+        max_retries: int = 3,
+        timeout: int = 5000,
+        force: bool = True,
+        wait_after: int = 500
+    ) -> bool:
+        """
+        Click element with retry logic and proper wait strategies.
+
+        Args:
+            locator: Playwright locator object
+            element_name: Name for logging purposes
+            max_retries: Maximum number of click attempts
+            timeout: Timeout for each click attempt in ms
+            force: Use force click to bypass actionability checks
+            wait_after: Wait time after successful click in ms
+
+        Returns:
+            True if click succeeded, False otherwise
+        """
+        for attempt in range(max_retries):
+            try:
+                # Wait for element to be visible and attached
+                locator.wait_for(state="visible", timeout=timeout)
+                locator.wait_for(state="attached", timeout=timeout)
+
+                # Perform click
+                locator.click(timeout=timeout, force=force)
+
+                # Wait for click to register
+                self.page.wait_for_timeout(wait_after)
+
+                self.logger.debug(f"Successfully clicked {element_name} (attempt {attempt + 1}/{max_retries})")
+                return True
+
+            except PlaywrightTimeout as e:
+                if attempt < max_retries - 1:
+                    self.logger.warning(
+                        f"Click on {element_name} failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying..."
+                    )
+                    self.page.wait_for_timeout(1000)  # Wait before retry
+                else:
+                    self.logger.error(
+                        f"Click on {element_name} failed after {max_retries} attempts: {e}"
+                    )
+                    return False
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    self.logger.warning(
+                        f"Unexpected error clicking {element_name} (attempt {attempt + 1}/{max_retries}): {e}. Retrying..."
+                    )
+                    self.page.wait_for_timeout(1000)
+                else:
+                    self.logger.error(
+                        f"Unexpected error clicking {element_name} after {max_retries} attempts: {e}"
+                    )
+                    return False
+
+        return False
+
     def search_chat(self, chat_username: str, retry: int = 0, max_retries: int = 2) -> bool:
         """
         Search for chat by username with retry logic.
@@ -97,8 +161,8 @@ class TelegramSender:
                 pass
 
             # Click search input to focus
-            search_input.click()
-            self.page.wait_for_timeout(300)
+            search_input.click(timeout=5000)
+            self.page.wait_for_timeout(500)  # Increased from 300ms
 
             # Enter username - use fill for reliability
             search_input.fill(chat_username)
@@ -195,23 +259,50 @@ class TelegramSender:
                 self.logger.error(f"Chat element count is 0: {chat_username}")
                 return False
 
-            # Click the chat element directly
+            # Click the chat element with retry logic
             self.logger.debug(f"Clicking chat element for: {chat_username}")
-            chat_element.click()
-            self.page.wait_for_timeout(500)
 
-            # Wait for topbar to appear (indicates chat opened)
-            try:
-                self.page.wait_for_selector(
-                    TelegramSelectors.TOPBAR,
-                    timeout=5000
+            # Use retry logic for clicking chat element
+            for retry in range(3):
+                # Click with force and proper waits
+                click_success = self.click_with_retry(
+                    chat_element,
+                    element_name=f"chat element ({chat_username})",
+                    max_retries=1,  # Single attempt per outer retry
+                    timeout=5000,
+                    force=True,
+                    wait_after=1000  # Increased from 500ms to 1000ms
                 )
-                self.logger.debug(f"Chat opened: {chat_username}")
-                return True
 
-            except PlaywrightTimeout:
-                self.logger.error(f"Failed to open chat: {chat_username}")
-                return False
+                if not click_success:
+                    if retry < 2:
+                        self.logger.warning(f"Chat click failed, retrying... (attempt {retry + 2}/3)")
+                        self.page.wait_for_timeout(1000)
+                        continue
+                    else:
+                        self.logger.error(f"Failed to click chat element after 3 attempts")
+                        return False
+
+                # Wait for topbar to appear (indicates chat opened)
+                try:
+                    self.page.wait_for_selector(
+                        TelegramSelectors.TOPBAR,
+                        timeout=5000
+                    )
+                    self.logger.debug(f"Chat opened successfully: {chat_username}")
+                    return True
+
+                except PlaywrightTimeout:
+                    if retry < 2:
+                        self.logger.warning(
+                            f"Chat didn't open (topbar not found), retrying click... (attempt {retry + 2}/3)"
+                        )
+                        self.page.wait_for_timeout(1000)
+                    else:
+                        self.logger.error(f"Failed to open chat after 3 attempts: {chat_username}")
+                        return False
+
+            return False
 
         except Exception as e:
             self.logger.error(f"Error opening chat {chat_username}: {e}")
@@ -248,37 +339,80 @@ class TelegramSender:
             if join_btn.count() > 0:
                 self.logger.info("JOIN button detected, attempting to join channel...")
 
-                try:
-                    # Click JOIN button with force to avoid auto-scroll issues
-                    join_btn.first.click(force=True)
-                    self.logger.debug("Clicked JOIN button")
-
-                    # Wait for button to disappear (successful join)
+                # Use retry logic for JOIN button click
+                join_success = False
+                for retry in range(3):
                     try:
-                        self.page.wait_for_selector(
-                            TelegramSelectors.JOIN_BUTTON,
-                            state="hidden",
-                            timeout=10000
+                        # Get first JOIN button locator
+                        join_locator = join_btn.first
+
+                        # Click with retry logic
+                        click_success = self.click_with_retry(
+                            join_locator,
+                            element_name="JOIN button",
+                            max_retries=1,  # Single attempt per outer retry
+                            timeout=5000,
+                            force=True,  # Use force to avoid auto-scroll issues
+                            wait_after=1000
                         )
-                        self.logger.info("Successfully joined channel")
 
-                        # Wait for UI to stabilize after joining
-                        self.page.wait_for_timeout(3000)
+                        if not click_success:
+                            if retry < 2:
+                                self.logger.warning(f"JOIN button click failed, retrying... (attempt {retry + 2}/3)")
+                                self.page.wait_for_timeout(1000)
+                                continue
+                            else:
+                                self.logger.error("Failed to click JOIN button after 3 attempts")
+                                restrictions['can_send'] = False
+                                restrictions['reason'] = 'need_to_join'
+                                return restrictions
 
-                        # Continue with other checks (don't return, button is gone now)
+                        # Wait for button to disappear (successful join)
+                        try:
+                            self.page.wait_for_selector(
+                                TelegramSelectors.JOIN_BUTTON,
+                                state="hidden",
+                                timeout=10000
+                            )
+                            self.logger.info("Successfully joined channel")
 
-                    except PlaywrightTimeout:
-                        # Button didn't disappear - join failed
-                        self.logger.error("JOIN button did not disappear - join may have failed")
-                        restrictions['can_send'] = False
-                        restrictions['reason'] = 'need_to_join'
-                        return restrictions
+                            # Wait for UI to stabilize after joining
+                            self.page.wait_for_timeout(3000)
 
-                except Exception as e:
-                    self.logger.error(f"Error clicking JOIN button: {e}")
+                            # Mark as successful and exit retry loop
+                            join_success = True
+                            break
+
+                        except PlaywrightTimeout:
+                            # Button didn't disappear - join may have failed
+                            if retry < 2:
+                                self.logger.warning(
+                                    f"JOIN button still visible after click, retrying... (attempt {retry + 2}/3)"
+                                )
+                                self.page.wait_for_timeout(1500)
+                            else:
+                                self.logger.error("JOIN button did not disappear after 3 attempts - join failed")
+                                restrictions['can_send'] = False
+                                restrictions['reason'] = 'need_to_join'
+                                return restrictions
+
+                    except Exception as e:
+                        if retry < 2:
+                            self.logger.error(f"Error clicking JOIN button (attempt {retry + 1}/3): {e}. Retrying...")
+                            self.page.wait_for_timeout(1500)
+                        else:
+                            self.logger.error(f"Error clicking JOIN button after 3 attempts: {e}")
+                            restrictions['can_send'] = False
+                            restrictions['reason'] = 'need_to_join'
+                            return restrictions
+
+                # Check if join was successful
+                if not join_success:
                     restrictions['can_send'] = False
                     restrictions['reason'] = 'need_to_join'
                     return restrictions
+
+                # Continue with other checks (button is gone now)
 
             # Check 3: Premium required
             premium_btn = self.page.locator(TelegramSelectors.PREMIUM_BUTTON)
@@ -338,9 +472,19 @@ class TelegramSender:
                 self.logger.error("Message input not found")
                 return False
 
-            # Click on input to focus
-            message_input.click()
-            self.page.wait_for_timeout(300)
+            # Click on input to focus with proper waits
+            click_success = self.click_with_retry(
+                message_input,
+                element_name="message input",
+                max_retries=3,
+                timeout=5000,
+                force=False,  # Don't force for input fields
+                wait_after=800  # Increased from 300ms to 800ms
+            )
+
+            if not click_success:
+                self.logger.error("Failed to click message input")
+                return False
 
             # Enter message using JavaScript (most reliable for contenteditable)
             # Pass message as argument to prevent injection
@@ -366,12 +510,55 @@ class TelegramSender:
                 self.logger.error("Send button did not appear")
                 return False
 
-            # Click send button
-            send_button.click()
-            self.page.wait_for_timeout(1000)
+            # Click send button with retry logic
+            for retry in range(3):
+                click_success = self.click_with_retry(
+                    send_button,
+                    element_name="send button",
+                    max_retries=1,  # Single attempt per outer retry
+                    timeout=5000,
+                    force=True,  # Use force to ensure click registers
+                    wait_after=1500  # Increased from 1000ms to 1500ms
+                )
 
-            self.logger.debug("Message sent successfully")
-            return True
+                if not click_success:
+                    if retry < 2:
+                        self.logger.warning(f"Send button click failed, retrying... (attempt {retry + 2}/3)")
+                        self.page.wait_for_timeout(1000)
+                        continue
+                    else:
+                        self.logger.error("Failed to click send button after 3 attempts")
+                        return False
+
+                # Verify message was sent by checking if input is empty
+                try:
+                    # Wait a bit for the message to be sent
+                    self.page.wait_for_timeout(500)
+
+                    # Check if input is empty (message was sent)
+                    input_content = message_input.text_content()
+                    if not input_content or input_content.strip() == "":
+                        self.logger.debug("Message sent successfully")
+                        return True
+                    else:
+                        if retry < 2:
+                            self.logger.warning(
+                                f"Message not sent (input not cleared), retrying... (attempt {retry + 2}/3)"
+                            )
+                            self.page.wait_for_timeout(1000)
+                        else:
+                            self.logger.error("Message send verification failed after 3 attempts")
+                            return False
+
+                except Exception as e:
+                    if retry < 2:
+                        self.logger.warning(f"Error verifying send: {e}, retrying... (attempt {retry + 2}/3)")
+                        self.page.wait_for_timeout(1000)
+                    else:
+                        self.logger.error(f"Error verifying send after 3 attempts: {e}")
+                        return False
+
+            return False
 
         except Exception as e:
             self.logger.error(f"Error sending message: {e}")

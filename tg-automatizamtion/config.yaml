@@ -24,12 +24,13 @@ retry:
   enabled: false                       # Повторять ли неудачные попытки
   max_attempts: 3                      # Максимум попыток
   delay_between_retries: 60            # Задержка между попытками (секунды)
+  max_attempts_before_block: 3         # Блокировать чат после N неудачных попыток
 
 # Скриншоты
 screenshots:
   enabled: true                        # Включить/выключить скриншоты
   on_error: true                       # Скриншоты при ошибках
-  on_warning: false                    # Скриншоты при предупреждениях (чат не найден)
+  on_warning: true                     # Скриншоты при предупреждениях (чат не найден)
   on_debug: false                      # Отладочные скриншоты
   full_page: true                      # Скриншот всей страницы
   quality: 80                          # Качество (0-100)

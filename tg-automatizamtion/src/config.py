@@ -47,6 +47,7 @@ class RetryConfig:
     enabled: bool = False
     max_attempts: int = 3
     delay_between_retries: int = 60
+    max_attempts_before_block: int = 3  # Block task after N failed attempts
 
 
 @dataclass
@@ -168,6 +169,10 @@ class Config:
 
         if self.timeouts.page_load_timeout <= 0:
             raise ValueError("page_load_timeout must be > 0")
+
+        # Validate retry config
+        if self.retry.max_attempts_before_block < 1:
+            raise ValueError("max_attempts_before_block must be >= 1")
 
         # Validate screenshot quality
         if not (0 <= self.screenshots.quality <= 100):
