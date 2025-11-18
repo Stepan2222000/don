@@ -230,11 +230,23 @@ class Worker:
             sent = self.telegram.send_message(message)
 
             if not sent:
-                # Failed to send
-                self.error_handler.handle_unexpected_error(
-                    task,
-                    Exception("Failed to send message")
-                )
+                # Failed to send - check error type
+                error_type = self.telegram.last_error_type
+
+                if error_type == 'slow_mode_active':
+                    # Slow Mode restriction detected
+                    self.error_handler.handle_send_restriction(
+                        task,
+                        restriction_reason='slow_mode_active',
+                        error_details="Slow Mode active - time-based cooldown"
+                    )
+                else:
+                    # Other send failure (unexpected error)
+                    self.error_handler.handle_unexpected_error(
+                        task,
+                        Exception("Failed to send message")
+                    )
+
                 self.logger.log_task_complete(chat_username, success=False)
                 return False
 

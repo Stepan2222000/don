@@ -87,7 +87,7 @@ class TaskQueue:
                                       AND ta.status = 'success'
                                 ) < :max_cycles
                                 AND (t.next_available_at IS NULL OR t.next_available_at <= CURRENT_TIMESTAMP)
-                                AND (t.status = 'pending' OR (t.status = 'in_progress' AND t.assigned_profile_id = :profile_id))
+                                AND (t.status = 'pending' OR t.status = 'completed' OR (t.status = 'in_progress' AND t.assigned_profile_id = :profile_id))
                             ORDER BY
                                 (
                                     SELECT COUNT(*)

@@ -167,6 +167,7 @@ class ErrorHandler:
         - premium_required: Premium subscription required
         - user_blocked: User is blocked
         - input_not_available: Input field not accessible
+        - slow_mode_active: Slow Mode restriction (time-based cooldown)
 
         Actions:
         1. Save screenshot (warning level)
@@ -188,7 +189,8 @@ class ErrorHandler:
             'premium_required': 'Cannot send - Premium subscription required',
             'user_blocked': 'Cannot send - user is blocked',
             'input_not_available': 'Cannot send - message input not available',
-            'paid_message_required': 'Cannot send - paid message (Telegram Stars) required'
+            'paid_message_required': 'Cannot send - paid message (Telegram Stars) required',
+            'slow_mode_active': 'Cannot send - Slow Mode active (time-based cooldown)'
         }
 
         error_msg = reason_messages.get(restriction_reason, restriction_reason)

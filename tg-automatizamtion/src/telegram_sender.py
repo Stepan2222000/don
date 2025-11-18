@@ -57,18 +57,20 @@ class TelegramSender:
         self.page = page
         self.config = get_config()
         self.logger = get_logger()
+        self.last_error_type = None  # Track last error type for worker.py
 
     def close_popups(self) -> bool:
         """
         Close any Telegram popups that might intercept pointer events.
 
-        This includes Telegram Stars promotional popups and other overlay popups.
+        Used in search_chat() to ensure search interface is not blocked.
+        NOT used in send_message() to allow Stars detection.
 
         Returns:
             True if popup was found and closed, False otherwise
         """
         try:
-            # Check for Telegram Stars popup (multiple selectors for reliability)
+            # Close all active popups (including Stars)
             popup_selectors = [
                 "div.popup.popup-stars.active",  # Stars popup with active class
                 "div.popup:has-text('Stars')",   # Any popup mentioning Stars
@@ -529,9 +531,9 @@ class TelegramSender:
         """
         self.logger.info(f"[SEND] Starting to send message: '{message_text[:50]}...'")
 
-        # Close any popups that might intercept clicks
-        self.logger.debug(f"[SEND] Closing any popups before sending")
-        self.close_popups()
+        # NOTE: We do NOT close popups here because Stars payment modal
+        # needs to remain visible for detection after text insertion
+        # close_popups() is only called in search_chat() to unblock search interface
 
         try:
             # Wait for topbar (chat should be open)
@@ -581,6 +583,39 @@ class TelegramSender:
             self.page.wait_for_timeout(500)
             self.logger.debug(f"[SEND] ✓ Message text inserted into input field")
 
+            # ========================================
+            # CRITICAL: Check for Stars payment requirement AFTER text insertion
+            # The Stars modal/requirement only appears after interacting with input
+            # ========================================
+
+            # Check 1: Verify input placeholder for Stars indicator
+            self.logger.debug(f"[SEND] Checking for Stars payment requirement...")
+            try:
+                # Get placeholder and actual content
+                input_placeholder = message_input.get_attribute('placeholder') or ""
+                input_inner_text = message_input.inner_text() or ""
+
+                # Check for star symbol in placeholder or input display
+                if '⭐' in input_placeholder or 'Message for ⭐' in input_inner_text:
+                    self.logger.warning(f"[SEND] ✗ Stars payment required detected in input (placeholder: '{input_placeholder}')")
+                    return False
+
+                self.logger.debug(f"[SEND] ✓ No Stars indicator in input placeholder")
+
+            except Exception as e:
+                self.logger.debug(f"[SEND] Could not check input placeholder: {e}")
+
+            # Check 2: Re-run full restrictions check (Stars modal may now be visible)
+            self.logger.debug(f"[SEND] Re-checking chat restrictions after input interaction...")
+            restrictions = self.check_chat_restrictions()
+
+            if not restrictions.get('can_send'):
+                reason = restrictions.get('reason', 'unknown')
+                self.logger.warning(f"[SEND] ✗ Restriction detected after input: {reason}")
+                return False
+
+            self.logger.debug(f"[SEND] ✓ No restrictions detected, proceeding with send")
+
             # Wait for send button to appear
             self.logger.debug(f"[SEND] Waiting for send button to appear")
             send_button = self.page.locator(TelegramSelectors.SEND_BUTTON)
@@ -612,6 +647,38 @@ class TelegramSender:
                         self.logger.error("Failed to click send button after 3 attempts")
                         return False
 
+                # ========================================
+                # CRITICAL: Check for Slow Mode restriction AFTER send button click
+                # Slow Mode tooltip only appears AFTER clicking send (post-click restriction)
+                # ========================================
+                self.logger.debug(f"[SEND] Checking for Slow Mode restriction...")
+                self.page.wait_for_timeout(1000)  # Wait for possible Slow Mode tooltip
+
+                # Check for Slow Mode tooltip (English and Russian)
+                slow_mode_selectors = [
+                    '.tooltip:has-text("Slow Mode")',
+                    '.tooltip:has-text("slow mode")',
+                    '.tooltip:has-text("медленный режим")',
+                    '.tooltip:has-text("Медленный режим")'
+                ]
+
+                for selector in slow_mode_selectors:
+                    slow_mode_tooltip = self.page.locator(selector).first
+                    if slow_mode_tooltip.count() > 0:
+                        try:
+                            tooltip_text = slow_mode_tooltip.inner_text() or "Slow Mode active"
+                            self.logger.warning(f"[SEND] ✗ Slow Mode restriction detected: {tooltip_text}")
+                            self.last_error_type = 'slow_mode_active'
+                            return False
+                        except Exception as e:
+                            self.logger.debug(f"[SEND] Error reading Slow Mode tooltip: {e}")
+                            # Still treat as Slow Mode if we detected the element
+                            self.logger.warning(f"[SEND] ✗ Slow Mode restriction detected")
+                            self.last_error_type = 'slow_mode_active'
+                            return False
+
+                self.logger.debug(f"[SEND] ✓ No Slow Mode restriction detected")
+
                 # Verify message was sent using multiple checks
                 try:
                     # Wait a bit for the message to be sent
@@ -628,6 +695,7 @@ class TelegramSender:
                     # This handles cases where whitespace/HTML remains but message was sent
                     if not send_button_visible or input_empty:
                         self.logger.info(f"[SEND] ✓✓✓ MESSAGE SENT SUCCESSFULLY (send_button_visible={send_button_visible}, input_empty={input_empty})")
+                        self.last_error_type = None  # Clear error on success
                         return True
                     else:
                         if retry < 2:
