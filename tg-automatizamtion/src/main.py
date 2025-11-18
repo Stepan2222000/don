@@ -277,10 +277,10 @@ def cmd_init(args):
     print("\n✓ Initialization complete!")
     print("\nNext steps:")
     print("  1. Edit config.yaml to adjust settings")
-    print("  2. Import chats: python -m src.main import-chats data/chats.txt")
-    print("  3. Import messages: python -m src.main import-messages data/messages.json")
-    print("  4. Add profiles: python -m src.main add-profile <profile_name>")
-    print("  5. Start automation: python -m src.main start")
+    print("  2. Edit data/groups.json to configure groups (profiles, chats, messages)")
+    print("  3. Import chats: python -m src.main import-chats data/chats.txt --group group_1")
+    print("  4. Start automation: python -m src.main start --group group_1")
+    print("\nNote: Messages from groups.json are imported automatically on first start")
 
 
 def cmd_import_chats(args):
@@ -426,6 +426,27 @@ def cmd_start(args):
     )
     init_profile_manager()
     task_queue = get_task_queue()
+
+    # Auto-import messages from group config if not already in database
+    logger.info(f"[AUTO-IMPORT] Checking messages for group '{args.group}'")
+    logger.debug(f"[AUTO-IMPORT] Group config has {len(group.messages)} messages")
+    if group.messages:
+        existing_messages = db.get_active_messages(args.group)
+        logger.debug(f"[AUTO-IMPORT] Database has {len(existing_messages)} active messages for this group")
+
+        if not existing_messages:
+            logger.info(f"[AUTO-IMPORT] Starting auto-import of {len(group.messages)} messages...")
+            logger.debug(f"[AUTO-IMPORT] Messages to import: {group.messages[:2]}... (showing first 2)")
+            count = db.import_messages(args.group, group.messages)
+            logger.info(f"[AUTO-IMPORT] ✓ Successfully imported {count} messages from group config")
+
+            # Verify import
+            verification = db.get_active_messages(args.group)
+            logger.info(f"[AUTO-IMPORT] Verification: {len(verification)} messages now in database")
+        else:
+            logger.info(f"[AUTO-IMPORT] Skipping import - group already has {len(existing_messages)} messages in database")
+    else:
+        logger.warning(f"[AUTO-IMPORT] Group '{args.group}' has no messages in config file!")
 
     # Reset any stale tasks from previous crashes (for this group)
     logger.info(f"Resetting stale tasks for group '{args.group}'...")

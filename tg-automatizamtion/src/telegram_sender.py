@@ -527,14 +527,17 @@ class TelegramSender:
         Returns:
             True if message sent successfully
         """
-        self.logger.debug(f"Sending message: {message_text[:50]}...")
+        self.logger.info(f"[SEND] Starting to send message: '{message_text[:50]}...'")
 
         # Close any popups that might intercept clicks
+        self.logger.debug(f"[SEND] Closing any popups before sending")
         self.close_popups()
 
         try:
             # Wait for topbar (chat should be open)
+            self.logger.debug(f"[SEND] Waiting for chat topbar to confirm chat is open")
             self.page.wait_for_selector(TelegramSelectors.TOPBAR, timeout=5000)
+            self.logger.debug(f"[SEND] ✓ Chat topbar found, chat is open")
 
             # Find message input
             message_input = self.page.locator(TelegramSelectors.MESSAGE_INPUT).first
@@ -545,6 +548,7 @@ class TelegramSender:
                 return False
 
             # Click on input to focus with proper waits
+            self.logger.debug(f"[SEND] Clicking on message input to focus")
             click_success = self.click_with_retry(
                 message_input,
                 element_name="message input",
@@ -555,8 +559,10 @@ class TelegramSender:
             )
 
             if not click_success:
-                self.logger.error("Failed to click message input")
+                self.logger.error("[SEND] ✗ Failed to click message input")
                 return False
+
+            self.logger.debug(f"[SEND] ✓ Message input focused, typing message")
 
             # Enter message using JavaScript (most reliable for contenteditable)
             # Pass message as argument to prevent injection
@@ -573,16 +579,20 @@ class TelegramSender:
             # Trigger input event
             message_input.dispatch_event('input')
             self.page.wait_for_timeout(500)
+            self.logger.debug(f"[SEND] ✓ Message text inserted into input field")
 
             # Wait for send button to appear
+            self.logger.debug(f"[SEND] Waiting for send button to appear")
             send_button = self.page.locator(TelegramSelectors.SEND_BUTTON)
             try:
                 send_button.wait_for(state='visible', timeout=3000)
+                self.logger.debug(f"[SEND] ✓ Send button is visible")
             except PlaywrightTimeout:
-                self.logger.error("Send button did not appear")
+                self.logger.error("[SEND] ✗ Send button did not appear after typing message")
                 return False
 
             # Click send button with retry logic
+            self.logger.debug(f"[SEND] Clicking send button to send message")
             for retry in range(3):
                 click_success = self.click_with_retry(
                     send_button,
@@ -617,7 +627,7 @@ class TelegramSender:
                     # Message is sent if EITHER send button is hidden OR input is empty
                     # This handles cases where whitespace/HTML remains but message was sent
                     if not send_button_visible or input_empty:
-                        self.logger.debug(f"Message sent successfully (send_button_visible={send_button_visible}, input_empty={input_empty})")
+                        self.logger.info(f"[SEND] ✓✓✓ MESSAGE SENT SUCCESSFULLY (send_button_visible={send_button_visible}, input_empty={input_empty})")
                         return True
                     else:
                         if retry < 2:
