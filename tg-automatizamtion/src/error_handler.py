@@ -21,7 +21,7 @@ from .telegram_sender import TelegramSender
 class ErrorHandler:
     """Handles various error scenarios during automation."""
 
-    def __init__(self, profile_id: str, profile_name: str, page: Page):
+    def __init__(self, profile_id: str, profile_name: str, page: Page, group_id: str):
         """
         Initialize error handler.
 
@@ -29,10 +29,12 @@ class ErrorHandler:
             profile_id: Profile UUID
             profile_name: Profile display name
             page: Playwright Page for screenshots
+            group_id: Campaign group ID
         """
         self.profile_id = profile_id
         self.profile_name = profile_name
         self.page = page
+        self.group_id = group_id
         self.config = get_config()
         self.db = get_database()
         self.logger = get_logger()
@@ -63,6 +65,7 @@ class ErrorHandler:
         # Save screenshot metadata to database if taken
         if screenshot_path:
             log_id = self.db.log_send(
+                group_id=self.group_id,
                 task_id=task['id'],
                 profile_id=self.profile_id,
                 chat_username=chat_username,
@@ -118,6 +121,7 @@ class ErrorHandler:
 
         # Log to send_log
         log_id = self.db.log_send(
+            group_id=self.group_id,
             task_id=task['id'] if task else None,
             profile_id=self.profile_id,
             chat_username=task['chat_username'] if task else 'N/A',
@@ -185,6 +189,7 @@ class ErrorHandler:
         # Save screenshot metadata if taken
         if screenshot_path:
             log_id = self.db.log_send(
+                group_id=self.group_id,
                 task_id=task['id'],
                 profile_id=self.profile_id,
                 chat_username=chat_username,
@@ -267,6 +272,7 @@ class ErrorHandler:
         # Save screenshot metadata if taken
         if screenshot_path:
             log_id = self.db.log_send(
+                group_id=self.group_id,
                 task_id=task['id'],
                 profile_id=self.profile_id,
                 chat_username=chat_username,
@@ -327,6 +333,7 @@ class ErrorHandler:
         # Save screenshot metadata if taken
         if screenshot_path:
             log_id = self.db.log_send(
+                group_id=self.group_id,
                 task_id=task['id'],
                 profile_id=self.profile_id,
                 chat_username=chat_username,

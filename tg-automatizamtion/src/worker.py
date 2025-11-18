@@ -83,7 +83,8 @@ class Worker:
             self.error_handler = ErrorHandler(
                 self.profile.profile_id,
                 self.profile.profile_name,
-                page
+                page,
+                self.group_id
             )
 
             # Browser automation now handles page loading and white page detection
