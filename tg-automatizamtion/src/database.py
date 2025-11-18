@@ -335,23 +335,60 @@ class Database:
         status: str,
         message_text: Optional[str] = None,
         error_type: Optional[str] = None,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        run_id: Optional[str] = None
     ) -> int:
         """Record task attempt."""
         with self.transaction() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO task_attempts (
-                    task_id, profile_id, cycle_number, status,
+                    task_id, profile_id, run_id, cycle_number, status,
                     message_text, error_type, error_message
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id
                 """,
-                (task_id, profile_id, cycle_number, status,
+                (task_id, profile_id, run_id, cycle_number, status,
                  message_text, error_type, error_message)
             )
             return cursor.fetchone()[0]
+
+    def get_task_attempts_count_by_run(
+        self,
+        task_id: int,
+        run_id: str,
+        status: Optional[str] = None
+    ) -> int:
+        """
+        Get count of task attempts for specific run_id.
+
+        Args:
+            task_id: Task ID
+            run_id: Run session ID
+            status: Optional filter by status (e.g., 'success')
+
+        Returns:
+            Count of attempts
+        """
+        conn = self._get_connection()
+        if status:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*) FROM task_attempts
+                WHERE task_id = ? AND run_id = ? AND status = ?
+                """,
+                (task_id, run_id, status)
+            )
+        else:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*) FROM task_attempts
+                WHERE task_id = ? AND run_id = ?
+                """,
+                (task_id, run_id)
+            )
+        return cursor.fetchone()[0]
 
     # ========================================
     # Messages operations

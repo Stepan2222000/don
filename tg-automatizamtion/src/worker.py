@@ -23,7 +23,13 @@ from .error_handler import ErrorHandler
 class Worker:
     """Worker process for automated message sending."""
 
-    def __init__(self, profile: DonutProfile, group_id: str, use_simplified: bool = True):
+    def __init__(
+        self,
+        profile: DonutProfile,
+        group_id: str,
+        use_simplified: bool = True,
+        run_id: Optional[str] = None
+    ):
         """
         Initialize worker.
 
@@ -31,10 +37,12 @@ class Worker:
             profile: DonutProfile to use for automation
             group_id: Campaign group ID to process tasks for
             use_simplified: Use simplified browser automation (faster)
+            run_id: Optional session ID for per-session cycle tracking
         """
         self.profile = profile
         self.group_id = group_id
         self.use_simplified = use_simplified
+        self.run_id = run_id
         self.config = get_config()
         self.logger = get_logger()
         self.db = get_database()
@@ -84,7 +92,8 @@ class Worker:
                 self.profile.profile_id,
                 self.profile.profile_name,
                 page,
-                self.group_id
+                self.group_id,
+                self.run_id
             )
 
             # Browser automation now handles page loading and white page detection
@@ -94,7 +103,11 @@ class Worker:
             # Main processing loop
             while True:
                 # Get next task from queue
-                task = self.task_queue.get_next_incomplete_task(self.group_id, self.profile.profile_id)
+                task = self.task_queue.get_next_incomplete_task(
+                    self.group_id,
+                    self.profile.profile_id,
+                    self.run_id
+                )
 
                 if task is None:
                     self.logger.info("No more tasks available. Worker finishing.")
@@ -229,7 +242,8 @@ class Worker:
             self.task_queue.mark_task_success(
                 task_id=task['id'],
                 profile_id=self.profile.profile_id,
-                message_text=message
+                message_text=message,
+                run_id=self.run_id
             )
 
             # Log success
@@ -272,6 +286,11 @@ def main():
         action='store_true',
         help="Use simplified browser automation"
     )
+    parser.add_argument(
+        '--run-id',
+        default=None,
+        help="Session ID for per-session cycle tracking"
+    )
 
     args = parser.parse_args()
 
@@ -308,7 +327,12 @@ def main():
             sys.exit(1)
 
         # Create and run worker
-        worker = Worker(profile, args.group_id, use_simplified=args.simplified)
+        worker = Worker(
+            profile,
+            args.group_id,
+            use_simplified=args.simplified,
+            run_id=args.run_id
+        )
         exit_code = worker.run()
         sys.exit(exit_code)
 

@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS task_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER NOT NULL,                  -- FK -> tasks.id
     profile_id TEXT NOT NULL,                  -- Кто отправлял
+    run_id TEXT,                               -- ID сессии запуска (NULL для старых записей)
     cycle_number INTEGER NOT NULL,             -- Номер цикла (1, 2, 3...)
     status TEXT NOT NULL,                      -- success/failed
     message_text TEXT,                         -- Отправленное сообщение
@@ -85,6 +86,8 @@ CREATE TABLE IF NOT EXISTS task_attempts (
 CREATE INDEX IF NOT EXISTS idx_attempts_task_id ON task_attempts(task_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_status ON task_attempts(status);
 CREATE INDEX IF NOT EXISTS idx_attempts_timestamp ON task_attempts(timestamp);
+CREATE INDEX IF NOT EXISTS idx_attempts_run_id ON task_attempts(run_id);
+CREATE INDEX IF NOT EXISTS idx_attempts_task_run ON task_attempts(task_id, run_id);
 
 -- =====================================================
 -- Table: messages

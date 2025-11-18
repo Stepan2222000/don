@@ -10,6 +10,7 @@ import json
 import asyncio
 import signal
 import time
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
@@ -26,16 +27,18 @@ PROJECT_ROOT = Path(__file__).parent.parent
 class WorkerManager:
     """Manages multiple worker processes."""
 
-    def __init__(self, profile_ids: List[str], group_id: str):
+    def __init__(self, profile_ids: List[str], group_id: str, run_id: Optional[str] = None):
         """
         Initialize worker manager.
 
         Args:
             profile_ids: List of profile UUIDs to run as workers
             group_id: Campaign group ID
+            run_id: Optional session ID for per-session cycle tracking (generated if not provided)
         """
         self.profile_ids = profile_ids
         self.group_id = group_id
+        self.run_id = run_id or str(uuid.uuid4())
         self.workers = {}  # profile_id -> Process
         self.stop_requested = False
 
@@ -59,12 +62,13 @@ class WorkerManager:
             Process object
         """
         logger = get_logger()
-        logger.info(f"Starting worker for profile: {profile_id}, group: {self.group_id}")
+        logger.info(f"Starting worker for profile: {profile_id}, group: {self.group_id}, run: {self.run_id}")
 
         process = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "src.worker",
             "--profile-id", profile_id,
             "--group-id", self.group_id,
+            "--run-id", self.run_id,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=PROJECT_ROOT
@@ -485,6 +489,7 @@ def cmd_start(args):
 
     # Create worker manager
     manager = WorkerManager(profile_ids, args.group)
+    print(f"Session ID (run_id): {manager.run_id}\n")
 
     # Run workers
     try:

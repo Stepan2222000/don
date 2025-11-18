@@ -21,7 +21,14 @@ from .telegram_sender import TelegramSender
 class ErrorHandler:
     """Handles various error scenarios during automation."""
 
-    def __init__(self, profile_id: str, profile_name: str, page: Page, group_id: str):
+    def __init__(
+        self,
+        profile_id: str,
+        profile_name: str,
+        page: Page,
+        group_id: str,
+        run_id: Optional[str] = None
+    ):
         """
         Initialize error handler.
 
@@ -30,11 +37,13 @@ class ErrorHandler:
             profile_name: Profile display name
             page: Playwright Page for screenshots
             group_id: Campaign group ID
+            run_id: Optional session ID for per-session tracking
         """
         self.profile_id = profile_id
         self.profile_name = profile_name
         self.page = page
         self.group_id = group_id
+        self.run_id = run_id
         self.config = get_config()
         self.db = get_database()
         self.logger = get_logger()
@@ -89,7 +98,8 @@ class ErrorHandler:
             error_type='chat_not_found',
             error_message=f"Chat {chat_username} not found in search results",
             should_block=True,
-            block_reason='chat_not_found'
+            block_reason='chat_not_found',
+            run_id=self.run_id
         )
 
         self.logger.info(f"Task blocked (chat not found): {chat_username}")
@@ -213,7 +223,8 @@ class ErrorHandler:
             profile_id=self.profile_id,
             error_type=restriction_reason,
             error_message=error_details or error_msg,
-            should_block=False  # Don't block, might work later
+            should_block=False,  # Don't block, might work later
+            run_id=self.run_id
         )
 
         self.logger.debug(f"Task failed (restriction): {chat_username} - {restriction_reason}")
@@ -297,7 +308,8 @@ class ErrorHandler:
             error_type='exception',
             error_message=f"{error_type}: {error_message}",
             should_block=should_block,
-            block_reason='max_retries_exceeded' if should_block else None
+            block_reason='max_retries_exceeded' if should_block else None,
+            run_id=self.run_id
         )
 
         if should_block:
@@ -357,7 +369,8 @@ class ErrorHandler:
             profile_id=self.profile_id,
             error_type='timeout',
             error_message=f"Timeout during {operation} ({timeout_seconds}s)",
-            should_block=False
+            should_block=False,
+            run_id=self.run_id
         )
 
         self.logger.debug(f"Task failed (timeout): {chat_username} - {operation}")
