@@ -308,10 +308,10 @@ def cmd_import_chats(args):
         sys.exit(1)
 
     # Import to database
-    print(f"Importing {len(chats)} chats...")
-    count = db.import_chats(chats, total_cycles=config.limits.max_cycles)
+    print(f"Importing {len(chats)} chats for group '{args.group}'...")
+    count = db.import_chats(args.group, chats, total_cycles=config.limits.max_cycles)
 
-    print(f"✓ Imported {count} chats successfully")
+    print(f"✓ Imported {count} chats successfully for group '{args.group}'")
 
 
 def cmd_import_messages(args):
@@ -339,10 +339,10 @@ def cmd_import_messages(args):
         sys.exit(1)
 
     # Import to database
-    print(f"Importing {len(messages)} messages...")
-    count = db.import_messages(messages)
+    print(f"Importing {len(messages)} messages for group '{args.group}'...")
+    count = db.import_messages(args.group, messages)
 
-    print(f"✓ Imported {count} messages successfully")
+    print(f"✓ Imported {count} messages successfully for group '{args.group}'")
 
 
 def cmd_add_profile(args):
@@ -570,10 +570,12 @@ def main():
     # import-chats command
     parser_import_chats = subparsers.add_parser('import-chats', help='Import chats from file')
     parser_import_chats.add_argument('file', help='Path to chats file (one @username per line)')
+    parser_import_chats.add_argument('--group', type=str, required=True, help='Campaign group ID')
 
     # import-messages command
     parser_import_messages = subparsers.add_parser('import-messages', help='Import messages from JSON')
     parser_import_messages.add_argument('file', help='Path to messages JSON file')
+    parser_import_messages.add_argument('--group', type=str, required=True, help='Campaign group ID')
 
     # add-profile command
     parser_add_profile = subparsers.add_parser('add-profile', help='Add profile(s) for automation')

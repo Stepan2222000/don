@@ -58,6 +58,55 @@ class TelegramSender:
         self.config = get_config()
         self.logger = get_logger()
 
+    def close_popups(self) -> bool:
+        """
+        Close any Telegram popups that might intercept pointer events.
+
+        This includes Telegram Stars promotional popups and other overlay popups.
+
+        Returns:
+            True if popup was found and closed, False otherwise
+        """
+        try:
+            # Check for Telegram Stars popup (multiple selectors for reliability)
+            popup_selectors = [
+                "div.popup.popup-stars.active",  # Stars popup with active class
+                "div.popup:has-text('Stars')",   # Any popup mentioning Stars
+                "div.popup.active",              # Any active popup
+            ]
+
+            for selector in popup_selectors:
+                popup = self.page.locator(selector).first
+                if popup.count() > 0:
+                    self.logger.debug(f"Found popup with selector: {selector}")
+
+                    # Try to find and click close button
+                    close_button = popup.locator("button.popup-close, button[aria-label='Close']").first
+                    if close_button.count() > 0:
+                        close_button.click(timeout=3000)
+                        self.page.wait_for_timeout(500)
+                        self.logger.info("Closed popup successfully")
+                        return True
+                    else:
+                        # Try pressing Escape key as fallback
+                        self.page.keyboard.press("Escape")
+                        self.page.wait_for_timeout(500)
+                        self.logger.info("Closed popup using Escape key")
+                        return True
+
+            # No popup found
+            return False
+
+        except Exception as e:
+            self.logger.debug(f"Error closing popup: {e}")
+            # Try Escape key as final fallback
+            try:
+                self.page.keyboard.press("Escape")
+                self.page.wait_for_timeout(300)
+            except:
+                pass
+            return False
+
     def click_with_retry(
         self,
         locator,
@@ -140,6 +189,9 @@ class TelegramSender:
 
         retry_suffix = f" (attempt {retry + 1}/{max_retries + 1})" if retry > 0 else ""
         self.logger.debug(f"Searching for chat: {chat_username}{retry_suffix}")
+
+        # Close any popups that might intercept clicks
+        self.close_popups()
 
         try:
             # Find search input - wait for it to be visible first
@@ -477,6 +529,9 @@ class TelegramSender:
         """
         self.logger.debug(f"Sending message: {message_text[:50]}...")
 
+        # Close any popups that might intercept clicks
+        self.close_popups()
+
         try:
             # Wait for topbar (chat should be open)
             self.page.wait_for_selector(TelegramSelectors.TOPBAR, timeout=5000)
@@ -495,7 +550,7 @@ class TelegramSender:
                 element_name="message input",
                 max_retries=3,
                 timeout=5000,
-                force=False,  # Don't force for input fields
+                force=True,  # Force click to bypass element interception
                 wait_after=800  # Increased from 300ms to 800ms
             )
 
@@ -547,20 +602,27 @@ class TelegramSender:
                         self.logger.error("Failed to click send button after 3 attempts")
                         return False
 
-                # Verify message was sent by checking if input is empty
+                # Verify message was sent using multiple checks
                 try:
                     # Wait a bit for the message to be sent
                     self.page.wait_for_timeout(500)
 
-                    # Check if input is empty (message was sent)
+                    # Check 1: Send button should be hidden when input is empty
+                    send_button_visible = send_button.is_visible()
+
+                    # Check 2: Input should be empty (text content check)
                     input_content = message_input.text_content()
-                    if not input_content or input_content.strip() == "":
-                        self.logger.debug("Message sent successfully")
+                    input_empty = not input_content or input_content.strip() == ""
+
+                    # Message is sent if EITHER send button is hidden OR input is empty
+                    # This handles cases where whitespace/HTML remains but message was sent
+                    if not send_button_visible or input_empty:
+                        self.logger.debug(f"Message sent successfully (send_button_visible={send_button_visible}, input_empty={input_empty})")
                         return True
                     else:
                         if retry < 2:
                             self.logger.warning(
-                                f"Message not sent (input not cleared), retrying... (attempt {retry + 2}/3)"
+                                f"Message not sent (send_button_visible={send_button_visible}, input_empty={input_empty}), retrying... (attempt {retry + 2}/3)"
                             )
                             self.page.wait_for_timeout(1000)
                         else:
