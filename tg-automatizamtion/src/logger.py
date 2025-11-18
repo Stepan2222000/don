@@ -127,6 +127,25 @@ class TelegramAutomationLogger:
         log_message = f'Profile: {profile_name} | Chat: {chat_username} | Error: Chat not found'
         self.failed_chats_logger.warning(log_message)
 
+    def log_blocked_after_retries(
+        self,
+        profile_name: str,
+        chat_username: str,
+        attempts: int,
+        last_error: str
+    ):
+        """
+        Log chat blocked after exceeding retry limit.
+
+        Format: "Profile: profile_name | Chat: @username | Error: Blocked after N attempts | Last error: details"
+        """
+        log_message = (
+            f'Profile: {profile_name} | Chat: {chat_username} | '
+            f'Error: Blocked after {attempts} failed attempts | '
+            f'Last error: {last_error}'
+        )
+        self.failed_chats_logger.warning(log_message)
+
     # ========================================
     # Failed send logger methods
     # ========================================
