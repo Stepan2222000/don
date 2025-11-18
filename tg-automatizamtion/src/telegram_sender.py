@@ -38,6 +38,11 @@ class TelegramSelectors:
     PREMIUM_BUTTON = "button:has-text('Premium'):not(.hide)"
     UNBLOCK_BUTTON = "button:has-text('Unblock'):not(.hide)"
 
+    # Payment/Stars indicators
+    STARS_BUTTON = "button:has-text('Stars'):not(.hide)"
+    PAY_BUTTON = "button:has-text('Pay'):not(.hide)"
+    STARS_POPUP = "div.popup:has-text('Stars')"
+
 
 class TelegramSender:
     """Telegram Web automation for sending messages."""
@@ -420,6 +425,18 @@ class TelegramSender:
                 restrictions['can_send'] = False
                 restrictions['reason'] = 'premium_required'
                 self.logger.debug("Premium subscription required")
+                return restrictions
+
+            # Check 3.5: Paid message (Telegram Stars required)
+            # Check multiple indicators for reliability
+            stars_btn = self.page.locator(TelegramSelectors.STARS_BUTTON)
+            pay_btn = self.page.locator(TelegramSelectors.PAY_BUTTON)
+            stars_popup = self.page.locator(TelegramSelectors.STARS_POPUP)
+
+            if stars_btn.count() > 0 or pay_btn.count() > 0 or stars_popup.count() > 0:
+                restrictions['can_send'] = False
+                restrictions['reason'] = 'paid_message_required'
+                self.logger.debug("Paid message (Telegram Stars) required")
                 return restrictions
 
             # Check 4: User blocked

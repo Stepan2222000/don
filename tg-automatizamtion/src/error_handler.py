@@ -177,7 +177,8 @@ class ErrorHandler:
             'need_to_join': 'Cannot send - need to join channel',
             'premium_required': 'Cannot send - Premium subscription required',
             'user_blocked': 'Cannot send - user is blocked',
-            'input_not_available': 'Cannot send - message input not available'
+            'input_not_available': 'Cannot send - message input not available',
+            'paid_message_required': 'Cannot send - paid message (Telegram Stars) required'
         }
 
         error_msg = reason_messages.get(restriction_reason, restriction_reason)
