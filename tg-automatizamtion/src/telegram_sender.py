@@ -6,6 +6,7 @@ Uses reliable selectors from SELECTORS.md documentation.
 """
 
 from typing import Dict, Optional, Any
+import re
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
 
 from .logger import get_logger
@@ -58,6 +59,105 @@ class TelegramSender:
         self.config = get_config()
         self.logger = get_logger()
         self.last_error_type = None  # Track last error type for worker.py
+        self.last_wait_duration = None  # Track wait duration for Slow Mode
+
+    def _parse_wait_time(self, text: str) -> Optional[int]:
+        """
+        Parse wait time from string like '51:03', '1h 20m', '5s'.
+        
+        Args:
+            text: Text containing time information
+            
+        Returns:
+            Total seconds to wait or None if parsing failed
+        """
+        try:
+            # Clean up text: remove newlines and extra spaces
+            clean_text = re.sub(r'\s+', ' ', text).strip()
+            self.logger.debug(f"Parsing time from text (cleaned): '{clean_text}' (original length: {len(text)})")
+            
+            # Try MM:SS format (e.g. 51:03)
+            match = re.search(r'(?:in|через)\s*(\d+):(\d+)', clean_text, re.IGNORECASE)
+            if match:
+                minutes, seconds = map(int, match.groups())
+                total = minutes * 60 + seconds
+                self.logger.debug(f"Parsed MM:SS: {minutes}m {seconds}s = {total}s")
+                return total
+
+            # Try HH:MM:SS format
+            match = re.search(r'(?:in|через)\s*(\d+):(\d+):(\d+)', clean_text, re.IGNORECASE)
+            if match:
+                hours, minutes, seconds = map(int, match.groups())
+                total = hours * 3600 + minutes * 60 + seconds
+                self.logger.debug(f"Parsed HH:MM:SS: {hours}h {minutes}m {seconds}s = {total}s")
+                return total
+
+            # Try text format (1h 20m, 5s, etc)
+            total_seconds = 0
+            found = False
+            
+            # Hours
+            h_match = re.search(r'(\d+)\s*(?:h|ч|hours?|часов?)', clean_text, re.IGNORECASE)
+            if h_match:
+                total_seconds += int(h_match.group(1)) * 3600
+                found = True
+                
+            # Minutes
+            m_match = re.search(r'(\d+)\s*(?:m|м|min|minutes?|минут?)', clean_text, re.IGNORECASE)
+            if m_match:
+                total_seconds += int(m_match.group(1)) * 60
+                found = True
+                
+            # Seconds
+            s_match = re.search(r'(\d+)\s*(?:s|с|sec|seconds?|секунд?)', clean_text, re.IGNORECASE)
+            if s_match:
+                total_seconds += int(s_match.group(1))
+                found = True
+                
+            if found:
+                self.logger.debug(f"Parsed text format: {total_seconds}s")
+                return total_seconds
+                
+            # Try looking for isolated MM:SS at the end of string if no other match
+            simple_time = re.search(r'(\d+):(\d+)(?:\.|$)', clean_text)
+            if simple_time:
+                 minutes, seconds = map(int, simple_time.groups())
+                 total = minutes * 60 + seconds
+                 self.logger.debug(f"Parsed simple MM:SS: {minutes}m {seconds}s = {total}s")
+                 return total
+                 
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error parsing time string: {e}")
+            return None
+
+    def _check_slow_mode_text(self) -> Optional[int]:
+        """
+        Check for Slow Mode text on page and parse wait time.
+        
+        Returns:
+            Seconds to wait or None if not found
+        """
+        try:
+            # Look for notification containing Slow Mode text
+            # Using a broad locator to catch toasts, tooltips, or general messages
+            locator = self.page.locator("text=/Slow Mode is active|Медленный режим активен/")
+            
+            if locator.count() > 0:
+                # Get the text from the element
+                # We use first visible or just first
+                element = locator.first
+                if element.is_visible():
+                    text = element.inner_text()
+                    self.logger.warning(f"Found Slow Mode notification: '{text}'")
+                    return self._parse_wait_time(text)
+                    
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"Error checking slow mode text: {e}")
+            return None
 
     def close_popups(self) -> bool:
         """
@@ -191,6 +291,7 @@ class TelegramSender:
 
         retry_suffix = f" (attempt {retry + 1}/{max_retries + 1})" if retry > 0 else ""
         self.logger.debug(f"Searching for chat: {chat_username}{retry_suffix}")
+        self._save_debug_snapshot(f"search_start_{chat_username.replace('@', '')}")
 
         # Close any popups that might intercept clicks
         self.close_popups()
@@ -228,46 +329,102 @@ class TelegramSender:
 
             # Trigger input event manually
             search_input.dispatch_event('input')
+            self._save_debug_snapshot(f"search_input_filled_{chat_username.replace('@', '')}")
 
             # Wait longer for search results to load (5 seconds)
             self.page.wait_for_timeout(5000)
 
             self.logger.debug(f"Waiting for search results for: {chat_username}")
 
-            # Wait for search results in search container
-            # Search results appear in #search-container, not in main chatlist
+            # ========================================
+            # STEP 1: FIRST check if actual search results exist
+            # This must be checked BEFORE "No results" UI detection
+            # Because "Global search" can have results while "Messages" shows "No results"
+            # ========================================
             search_results_selector = "#search-container .search-super-content-chats .chatlist a.chatlist-chat[data-peer-id]"
 
             try:
-                self.page.wait_for_selector(
-                    search_results_selector,
-                    timeout=self.config.timeouts.search_timeout * 1000
-                )
-
-                # Verify the chat is actually visible in search results
+                # Quick check for existing results without timeout
                 chat_elements = self.page.locator(search_results_selector).all()
-                self.logger.debug(f"Found {len(chat_elements)} chat elements in search results")
+                self.logger.debug(f"[SEARCH] Found {len(chat_elements)} chat elements in search results")
 
                 if len(chat_elements) > 0:
-                    self.logger.debug(f"Chat found: {chat_username}")
+                    self.logger.debug(f"[SEARCH] ✓ Chat found: {chat_username} ({len(chat_elements)} results)")
+                    self._save_debug_snapshot(f"search_results_found_{chat_username.replace('@', '')}")
                     return True
-                else:
-                    self.logger.debug(f"Chat not found: {chat_username}")
+
+                # ========================================
+                # STEP 2: No results found - NOW check for "No results" UI
+                # This avoids false positives when "Messages" shows "No results"
+                # but "Global search" has actual chat results
+                # ========================================
+                self.logger.debug(f"[SEARCH] No chat elements found, checking for 'No results' UI...")
+
+                no_results_detected = False
+                try:
+                    # Check for "No results" indicators in search container
+                    no_results_selectors = [
+                        '.no-results',  # Generic no-results class
+                        'text="No results"',  # English text
+                        'text="Попробуйте поискать"',  # Russian text "Try a different search term"
+                        'text="Try a different search term"',  # English alternative
+                        '#search-container .empty-search',  # Empty search state
+                    ]
+
+                    for selector in no_results_selectors:
+                        if self.page.locator(selector).count() > 0:
+                            self.logger.debug(f"[SEARCH] 'No results' UI detected (selector: {selector})")
+                            no_results_detected = True
+                            break
+
+                    if no_results_detected:
+                        self.logger.info(f"[SEARCH] ✗ Chat {chat_username} does not exist - 'No results' confirmed. Skipping retries.")
+                        self._save_debug_snapshot(f"search_no_results_{chat_username.replace('@', '')}")
+                        return False
+
+                except Exception as e:
+                    self.logger.debug(f"[SEARCH] Error checking for 'No results' UI: {e}")
+                    # Continue with timeout logic if check fails
+
+                # ========================================
+                # STEP 3: No results AND no "No results" UI - wait with timeout
+                # This handles cases where results are still loading
+                # ========================================
+                self.logger.debug(f"[SEARCH] No results yet and no 'No results' UI - waiting with timeout...")
+
+                try:
+                    self.page.wait_for_selector(
+                        search_results_selector,
+                        timeout=self.config.timeouts.search_timeout * 1000
+                    )
+
+                    # Check again after timeout
+                    chat_elements = self.page.locator(search_results_selector).all()
+                    self.logger.debug(f"[SEARCH] After timeout: found {len(chat_elements)} chat elements")
+
+                    if len(chat_elements) > 0:
+                        self.logger.debug(f"[SEARCH] ✓ Chat found after timeout: {chat_username}")
+                        return True
+                    else:
+                        self.logger.debug(f"[SEARCH] ✗ Chat not found after timeout: {chat_username}")
+                        self._save_debug_snapshot(f"search_timeout_{chat_username.replace('@', '')}")
+                        return False
+
+                except PlaywrightTimeout:
+                    self.logger.debug(f"[SEARCH] Timeout waiting for search results: {chat_username}")
+
+                    # Retry if available
+                    if retry < max_retries:
+                        self.logger.info(f"[SEARCH] Retrying search after timeout (attempt {retry + 2}/{max_retries + 1})...")
+                        self.page.wait_for_timeout(3000)
+                        return self.search_chat(chat_username, retry + 1, max_retries)
+
+                    self.logger.warning(f"[SEARCH] ✗ All retries exhausted for {chat_username}")
                     return False
 
-            except PlaywrightTimeout:
-                self.logger.debug(f"Timeout waiting for search results: {chat_username}")
-                # Log DOM state for debugging
-                search_container = self.page.locator("#search-container")
-                is_visible = search_container.is_visible() if search_container.count() > 0 else False
-                self.logger.debug(f"Search container visible: {is_visible}")
-
-                # Retry if available
-                if retry < max_retries:
-                    self.logger.info(f"Retrying search after timeout...")
-                    self.page.wait_for_timeout(3000)
-                    return self.search_chat(chat_username, retry + 1, max_retries)
-
+            except Exception as e:
+                self.logger.error(f"[SEARCH] Unexpected error during search: {e}")
+                # Don't retry on unexpected errors during the check itself
                 return False
 
         except Exception as e:
@@ -320,6 +477,7 @@ class TelegramSender:
 
             # Click the chat element with retry logic
             self.logger.debug(f"Clicking chat element for: {chat_username}")
+            self._save_debug_snapshot(f"open_chat_click_start_{chat_username.replace('@', '')}")
 
             # Use retry logic for clicking chat element
             for retry in range(3):
@@ -349,6 +507,7 @@ class TelegramSender:
                         timeout=5000
                     )
                     self.logger.debug(f"Chat opened successfully: {chat_username}")
+                    self._save_debug_snapshot(f"open_chat_success_{chat_username.replace('@', '')}")
                     return True
 
                 except PlaywrightTimeout:
@@ -384,6 +543,7 @@ class TelegramSender:
         }
 
         try:
+            self._save_debug_snapshot("restrictions_check_start")
             # Check 1: Account frozen - TEMPORARILY DISABLED
             # frozen = self.page.locator(TelegramSelectors.FROZEN_TEXT)
             # if frozen.count() > 0:
@@ -395,8 +555,9 @@ class TelegramSender:
 
             # Check 2: Join channel if needed
             join_btn = self.page.locator(TelegramSelectors.JOIN_BUTTON)
-            if join_btn.count() > 0:
+            if join_btn.count() > 0 and join_btn.first.is_visible():
                 self.logger.info("JOIN button detected, attempting to join channel...")
+                self._save_debug_snapshot("restrictions_join_detected")
 
                 # Use retry logic for JOIN button click
                 join_success = False
@@ -423,7 +584,8 @@ class TelegramSender:
                             else:
                                 self.logger.error("Failed to click JOIN button after 3 attempts")
                                 restrictions['can_send'] = False
-                                restrictions['reason'] = 'need_to_join'
+                                restrictions['reason'] = 'join_failed' # Changed from need_to_join
+                                self._save_debug_snapshot("restrictions_join_failed_click")
                                 return restrictions
 
                         # Wait for button to disappear (successful join)
@@ -434,6 +596,7 @@ class TelegramSender:
                                 timeout=10000
                             )
                             self.logger.info("Successfully joined channel")
+                            self._save_debug_snapshot("restrictions_join_success")
 
                             # Wait for UI to stabilize after joining
                             self.page.wait_for_timeout(3000)
@@ -452,7 +615,7 @@ class TelegramSender:
                             else:
                                 self.logger.error("JOIN button did not disappear after 3 attempts - join failed")
                                 restrictions['can_send'] = False
-                                restrictions['reason'] = 'need_to_join'
+                                restrictions['reason'] = 'join_failed' # Changed from need_to_join
                                 return restrictions
 
                     except Exception as e:
@@ -462,13 +625,13 @@ class TelegramSender:
                         else:
                             self.logger.error(f"Error clicking JOIN button after 3 attempts: {e}")
                             restrictions['can_send'] = False
-                            restrictions['reason'] = 'need_to_join'
+                            restrictions['reason'] = 'join_failed' # Changed from need_to_join
                             return restrictions
 
                 # Check if join was successful
                 if not join_success:
                     restrictions['can_send'] = False
-                    restrictions['reason'] = 'need_to_join'
+                    restrictions['reason'] = 'join_failed'
                     return restrictions
 
                 # Continue with other checks (button is gone now)
@@ -519,9 +682,50 @@ class TelegramSender:
             restrictions['reason'] = 'check_error'
             return restrictions
 
+    def _save_debug_snapshot(self, stage: str, force: bool = False) -> None:
+        """
+        Save a comprehensive debug snapshot (Screenshot + HTML) to the trash folder.
+        
+        Args:
+            stage: Name of the current stage/event
+            force: Whether to force save even if screenshots are disabled (default: False)
+        """
+        # Only save if enabled or forced (User requested "detailed logging... saved to separate folder")
+        # We will treat this as a temporary "Deep Debug" mode requested by user.
+        try:
+            import os
+            import datetime
+            
+            # Create trash directory
+            trash_dir = "logs/debug_trash"
+            os.makedirs(trash_dir, exist_ok=True)
+            
+            timestamp = datetime.datetime.now().strftime("%H%M%S_%f")[:9] # HHMMSS_mmm
+            prefix = f"{timestamp}_{stage}"
+            
+            # 1. Save HTML
+            try:
+                html_path = os.path.join(trash_dir, f"{prefix}.html")
+                with open(html_path, "w", encoding="utf-8") as f:
+                    f.write(self.page.content())
+            except Exception as e:
+                self.logger.error(f"Failed to save HTML snapshot for {stage}: {e}")
+
+            # 2. Save Screenshot
+            try:
+                png_path = os.path.join(trash_dir, f"{prefix}.png")
+                self.page.screenshot(path=png_path)
+            except Exception as e:
+                self.logger.error(f"Failed to save Screenshot snapshot for {stage}: {e}")
+                
+            self.logger.debug(f"[SNAPSHOT] Saved {stage} to {trash_dir}")
+            
+        except Exception as e:
+            self.logger.error(f"Critical error in _save_debug_snapshot: {e}")
+
     def send_message(self, message_text: str) -> bool:
         """
-        Send message in opened chat.
+        Send message in opened chat with Deep Debugging.
 
         Args:
             message_text: Message to send
@@ -529,193 +733,175 @@ class TelegramSender:
         Returns:
             True if message sent successfully
         """
-        self.logger.info(f"[SEND] Starting to send message: '{message_text[:50]}...'")
-
-        # NOTE: We do NOT close popups here because Stars payment modal
-        # needs to remain visible for detection after text insertion
-        # close_popups() is only called in search_chat() to unblock search interface
+        self.logger.info(f"[SEND] Starting send process. Message len: {len(message_text)}")
+        self._save_debug_snapshot("01_start")
+        
+        self.last_wait_duration = None
+        self.last_error_type = None
 
         try:
-            # Wait for topbar (chat should be open)
-            self.logger.debug(f"[SEND] Waiting for chat topbar to confirm chat is open")
-            self.page.wait_for_selector(TelegramSelectors.TOPBAR, timeout=5000)
-            self.logger.debug(f"[SEND] ✓ Chat topbar found, chat is open")
+            # 1. Verify Chat Open
+            self.logger.debug(f"[SEND] Waiting for topbar...")
+            try:
+                self.page.wait_for_selector(TelegramSelectors.TOPBAR, timeout=5000)
+                self._save_debug_snapshot("02_topbar_found")
+            except PlaywrightTimeout:
+                self.logger.error("[SEND] Topbar not found (Chat not open?)")
+                self._save_debug_snapshot("02_topbar_missing", force=True)
+                return False
 
-            # Find message input
+            # 2. Find Input
             message_input = self.page.locator(TelegramSelectors.MESSAGE_INPUT).first
-
-            # Check if input is available
             if message_input.count() == 0:
-                self.logger.error("Message input not found")
+                self.logger.error("[SEND] Message input not found")
+                self._save_debug_snapshot("03_input_missing", force=True)
+                return False
+            
+            self._save_debug_snapshot("03_input_found")
+
+            # 3. Pre-Type Checks (Stars & Slow Mode)
+            self.logger.debug(f"[SEND] Performing pre-type checks...")
+            
+            # Check Stars in placeholder
+            try:
+                placeholder = message_input.get_attribute('placeholder') or ""
+                if '⭐' in placeholder or 'Stars' in placeholder:
+                    self.logger.warning(f"[SEND] ✗ Stars detected in placeholder: '{placeholder}'")
+                    self._save_debug_snapshot("04_stars_detected_pre", force=True)
+                    return False
+            except Exception as e:
+                self.logger.error(f"[SEND] Error checking placeholder: {e}")
+
+            # Check Slow Mode (Preventive)
+            slow_wait = self._check_slow_mode_text()
+            if slow_wait:
+                self.logger.warning(f"[SEND] ✗ Slow Mode active before typing. Wait: {slow_wait}s")
+                self.last_error_type = 'slow_mode_active'
+                self.last_wait_duration = slow_wait
+                self._save_debug_snapshot("04_slow_mode_pre", force=True)
                 return False
 
-            # Click on input to focus with proper waits
-            self.logger.debug(f"[SEND] Clicking on message input to focus")
-            click_success = self.click_with_retry(
-                message_input,
-                element_name="message input",
-                max_retries=3,
-                timeout=5000,
-                force=True,  # Force click to bypass element interception
-                wait_after=800  # Increased from 300ms to 800ms
-            )
-
-            if not click_success:
-                self.logger.error("[SEND] ✗ Failed to click message input")
+            # 4. Focus Input
+            self.logger.debug(f"[SEND] Focusing input...")
+            if not self.click_with_retry(message_input, "message input", max_retries=3, force=True):
+                self.logger.error("[SEND] Failed to click input")
+                self._save_debug_snapshot("05_focus_failed", force=True)
                 return False
+            
+            self._save_debug_snapshot("05_input_focused")
 
-            self.logger.debug(f"[SEND] ✓ Message input focused, typing message")
-
-            # Enter message using JavaScript (most reliable for contenteditable)
-            # Pass message as argument to prevent injection
-            self.page.evaluate(
-                """(messageText) => {
-                    const input = document.querySelector('.input-message-input[contenteditable="true"]');
-                    if (input) {
-                        input.textContent = messageText;
-                    }
-                }""",
-                message_text
-            )
-
-            # Trigger input event
+            # 5. Type Message
+            self.logger.debug(f"[SEND] Typing message...")
+            self.page.evaluate("""(text) => {
+                const el = document.querySelector('.input-message-input[contenteditable="true"]');
+                if (el) el.textContent = text;
+            }""", message_text)
             message_input.dispatch_event('input')
             self.page.wait_for_timeout(500)
-            self.logger.debug(f"[SEND] ✓ Message text inserted into input field")
+            
+            self._save_debug_snapshot("06_message_typed")
 
-            # ========================================
-            # CRITICAL: Check for Stars payment requirement AFTER text insertion
-            # The Stars modal/requirement only appears after interacting with input
-            # ========================================
-
-            # Check 1: Verify input placeholder for Stars indicator
-            self.logger.debug(f"[SEND] Checking for Stars payment requirement...")
+            # 6. Post-Type Checks
+            self.logger.debug(f"[SEND] Performing post-type checks...")
+            
+            # Check Stars again (Modal might appear)
             try:
-                # Get placeholder and actual content
-                input_placeholder = message_input.get_attribute('placeholder') or ""
-                input_inner_text = message_input.inner_text() or ""
-
-                # Check for star symbol in placeholder or input display
-                if '⭐' in input_placeholder or 'Message for ⭐' in input_inner_text:
-                    self.logger.warning(f"[SEND] ✗ Stars payment required detected in input (placeholder: '{input_placeholder}')")
+                placeholder = message_input.get_attribute('placeholder') or ""
+                text = message_input.inner_text() or ""
+                if '⭐' in placeholder or 'Message for ⭐' in text:
+                    self.logger.warning(f"[SEND] ✗ Stars detected after typing")
+                    self._save_debug_snapshot("07_stars_detected_post", force=True)
                     return False
+            except: pass
 
-                self.logger.debug(f"[SEND] ✓ No Stars indicator in input placeholder")
-
-            except Exception as e:
-                self.logger.debug(f"[SEND] Could not check input placeholder: {e}")
-
-            # Check 2: Re-run full restrictions check (Stars modal may now be visible)
-            self.logger.debug(f"[SEND] Re-checking chat restrictions after input interaction...")
+            # Check Restrictions
             restrictions = self.check_chat_restrictions()
-
-            if not restrictions.get('can_send'):
-                reason = restrictions.get('reason', 'unknown')
-                self.logger.warning(f"[SEND] ✗ Restriction detected after input: {reason}")
+            if not restrictions['can_send']:
+                self.logger.warning(f"[SEND] ✗ Restriction detected: {restrictions['reason']}")
+                self._save_debug_snapshot(f"07_restriction_{restrictions['reason']}", force=True)
                 return False
 
-            self.logger.debug(f"[SEND] ✓ No restrictions detected, proceeding with send")
-
-            # Wait for send button to appear
-            self.logger.debug(f"[SEND] Waiting for send button to appear")
+            # 7. Find Send Button
+            self.logger.debug(f"[SEND] Waiting for Send button...")
             send_button = self.page.locator(TelegramSelectors.SEND_BUTTON)
             try:
                 send_button.wait_for(state='visible', timeout=3000)
-                self.logger.debug(f"[SEND] ✓ Send button is visible")
+                box = send_button.bounding_box()
+                self.logger.debug(f"[SEND] Button visible at {box}")
+                self._save_debug_snapshot("08_button_visible")
             except PlaywrightTimeout:
-                self.logger.error("[SEND] ✗ Send button did not appear after typing message")
+                # Check Slow Mode again
+                slow_wait = self._check_slow_mode_text()
+                if slow_wait:
+                    self.logger.warning(f"[SEND] ✗ Slow Mode hidden button. Wait: {slow_wait}s")
+                    self.last_error_type = 'slow_mode_active'
+                    self.last_wait_duration = slow_wait
+                    self._save_debug_snapshot("08_slow_mode_hidden_btn", force=True)
+                    return False
+                
+                self.logger.error("[SEND] Send button missing")
+                self._save_debug_snapshot("08_button_missing", force=True)
                 return False
 
-            # Click send button with retry logic
-            self.logger.debug(f"[SEND] Clicking send button to send message")
-            for retry in range(3):
-                click_success = self.click_with_retry(
-                    send_button,
-                    element_name="send button",
-                    max_retries=1,  # Single attempt per outer retry
-                    timeout=5000,
-                    force=True,  # Use force to ensure click registers
-                    wait_after=1500  # Increased from 1000ms to 1500ms
-                )
+            # 8. Click Send
+            self.logger.debug(f"[SEND] Clicking Send...")
+            try:
+                send_button.click(timeout=3000, force=True)
+                self.page.wait_for_timeout(500)
+            except Exception as e:
+                self.logger.warning(f"[SEND] Click failed: {e}")
+            
+            self._save_debug_snapshot("09_clicked")
 
-                if not click_success:
-                    if retry < 2:
-                        self.logger.warning(f"Send button click failed, retrying... (attempt {retry + 2}/3)")
-                        self.page.wait_for_timeout(1000)
-                        continue
-                    else:
-                        self.logger.error("Failed to click send button after 3 attempts")
-                        return False
-
-                # ========================================
-                # CRITICAL: Check for Slow Mode restriction AFTER send button click
-                # Slow Mode tooltip only appears AFTER clicking send (post-click restriction)
-                # ========================================
-                self.logger.debug(f"[SEND] Checking for Slow Mode restriction...")
-                self.page.wait_for_timeout(1000)  # Wait for possible Slow Mode tooltip
-
-                # Check for Slow Mode tooltip (English and Russian)
-                slow_mode_selectors = [
-                    '.tooltip:has-text("Slow Mode")',
-                    '.tooltip:has-text("slow mode")',
-                    '.tooltip:has-text("медленный режим")',
-                    '.tooltip:has-text("Медленный режим")'
-                ]
-
-                for selector in slow_mode_selectors:
-                    slow_mode_tooltip = self.page.locator(selector).first
-                    if slow_mode_tooltip.count() > 0:
-                        try:
-                            tooltip_text = slow_mode_tooltip.inner_text() or "Slow Mode active"
-                            self.logger.warning(f"[SEND] ✗ Slow Mode restriction detected: {tooltip_text}")
-                            self.last_error_type = 'slow_mode_active'
-                            return False
-                        except Exception as e:
-                            self.logger.debug(f"[SEND] Error reading Slow Mode tooltip: {e}")
-                            # Still treat as Slow Mode if we detected the element
-                            self.logger.warning(f"[SEND] ✗ Slow Mode restriction detected")
-                            self.last_error_type = 'slow_mode_active'
-                            return False
-
-                self.logger.debug(f"[SEND] ✓ No Slow Mode restriction detected")
-
-                # Verify message was sent using multiple checks
+            # 9. Verify & Retry
+            try:
+                current_text = message_input.inner_text()
+                if not current_text or not current_text.strip():
+                    self.logger.info("[SEND] ✓ Sent successfully (Standard)")
+                    self._save_debug_snapshot("10_success_standard")
+                    return True
+                
+                self.logger.warning(f"[SEND] Text remains: '{current_text[:20]}...'. Retrying with JS...")
+                self._save_debug_snapshot("09_click_failed_retry_js", force=True)
+                
+                # JS Click Retry
+                self.page.evaluate("""
+                    const btn = document.querySelector('button.btn-send');
+                    if (btn) {
+                        btn.click();
+                        btn.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                        btn.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                        btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                    }
+                """)
+                self.page.wait_for_timeout(1000)
+                
+                # Final Verify
+                current_text = message_input.inner_text()
+                if not current_text or not current_text.strip():
+                    self.logger.info("[SEND] ✓ Sent successfully (JS)")
+                    self._save_debug_snapshot("10_success_js")
+                    return True
+                
+                self.logger.error(f"[SEND] ✗ Failed to send. Text stuck.")
+                self._save_debug_snapshot("10_failed_final", force=True)
+                
+                # SOFT FAIL: Clear the input to prevent blocking next tasks
+                self.logger.warning("[SEND] Clearing stuck text from input...")
                 try:
-                    # Wait a bit for the message to be sent
-                    self.page.wait_for_timeout(500)
-
-                    # Check 1: Send button should be hidden when input is empty
-                    send_button_visible = send_button.is_visible()
-
-                    # Check 2: Input should be empty (text content check)
-                    input_content = message_input.text_content()
-                    input_empty = not input_content or input_content.strip() == ""
-
-                    # Message is sent if EITHER send button is hidden OR input is empty
-                    # This handles cases where whitespace/HTML remains but message was sent
-                    if not send_button_visible or input_empty:
-                        self.logger.info(f"[SEND] ✓✓✓ MESSAGE SENT SUCCESSFULLY (send_button_visible={send_button_visible}, input_empty={input_empty})")
-                        self.last_error_type = None  # Clear error on success
-                        return True
-                    else:
-                        if retry < 2:
-                            self.logger.warning(
-                                f"Message not sent (send_button_visible={send_button_visible}, input_empty={input_empty}), retrying... (attempt {retry + 2}/3)"
-                            )
-                            self.page.wait_for_timeout(1000)
-                        else:
-                            self.logger.error("Message send verification failed after 3 attempts")
-                            return False
-
+                    # Use force=True to bypass intercepting elements (like Join button or Mute banner)
+                    message_input.click(force=True)
+                    self.page.keyboard.press("Meta+A")
+                    self.page.keyboard.press("Backspace")
+                    self.logger.info("[SEND] Input cleared.")
                 except Exception as e:
-                    if retry < 2:
-                        self.logger.warning(f"Error verifying send: {e}, retrying... (attempt {retry + 2}/3)")
-                        self.page.wait_for_timeout(1000)
-                    else:
-                        self.logger.error(f"Error verifying send after 3 attempts: {e}")
-                        return False
+                    self.logger.error(f"[SEND] Failed to clear input: {e}")
+                    
+                return False
 
-            return False
+            except Exception as e:
+                self.logger.error(f"[SEND] Error verifying: {e}")
+                return False
 
         except Exception as e:
             self.logger.error(f"Error sending message: {e}")

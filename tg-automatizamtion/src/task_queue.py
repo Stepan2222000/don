@@ -63,7 +63,10 @@ class TaskQueue:
                     )
                     return None
 
-            with self.db.transaction() as conn:
+            # Use IMMEDIATE transaction to prevent race conditions
+            # This locks the database for writing, ensuring only one worker can
+            # select and update a task at a time.
+            with self.db.transaction(mode='IMMEDIATE') as conn:
                 # Use UPDATE + RETURNING for atomic operation
                 if run_id:
                     # Session-based: count successful attempts in current run_id
@@ -380,6 +383,14 @@ class TaskQueue:
                 self.db.block_task(task_id, block_reason or error_type)
                 self.logger.warning(
                     f"Task blocked: {task['chat_username']} - {block_reason or error_type}"
+                )
+            else:
+                # If not blocked, add a small backoff delay to prevent immediate retry loop
+                # This helps when multiple workers are running and one task keeps failing
+                backoff_seconds = 300  # 5 minutes backoff
+                self.db.set_task_next_available(task_id, backoff_seconds)
+                self.logger.debug(
+                    f"Task {task['chat_username']} failed (not blocked), backing off for {backoff_seconds}s"
                 )
 
         except Exception as e:

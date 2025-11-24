@@ -235,11 +235,43 @@ class Worker:
 
                 if error_type == 'slow_mode_active':
                     # Slow Mode restriction detected
-                    self.error_handler.handle_send_restriction(
-                        task,
-                        restriction_reason='slow_mode_active',
-                        error_details="Slow Mode active - time-based cooldown"
-                    )
+                    wait_duration = self.telegram.last_wait_duration
+                    
+                    if wait_duration:
+                        # Reschedule task
+                        buffer_seconds = 30
+                        total_wait = wait_duration + buffer_seconds
+                        self.logger.warning(f"Slow Mode active. Rescheduling task for {total_wait}s (wait: {wait_duration}s)")
+                        
+                        # Take debug screenshot of the Slow Mode notification
+                        try:
+                            screenshot_path = self.telegram.save_screenshot('warning', f'slow_mode_detected_{chat_username}')
+                            if screenshot_path:
+                                self.logger.info(f"Slow Mode screenshot saved: {screenshot_path}")
+                        except Exception as e:
+                            self.logger.error(f"Failed to save Slow Mode screenshot: {e}")
+
+                        # Set next available time (reschedule)
+                        self.task_queue.db.set_task_next_available(task['id'], total_wait)
+                        
+                        # Log event without marking as failed attempt in stats (to avoid block)
+                        self.task_queue.db.log_send(
+                            group_id=self.group_id,
+                            task_id=task['id'],
+                            profile_id=self.profile.profile_id,
+                            chat_username=chat_username,
+                            message_text=None,
+                            status='rescheduled',
+                            error_type='slow_mode_wait',
+                            error_details=f"Rescheduled for {total_wait}s"
+                        )
+                    else:
+                        # Fallback if no time parsed
+                        self.error_handler.handle_send_restriction(
+                            task,
+                            restriction_reason='slow_mode_active',
+                            error_details="Slow Mode active - time-based cooldown"
+                        )
                 else:
                     # Other send failure (unexpected error)
                     self.error_handler.handle_unexpected_error(

@@ -61,10 +61,18 @@ class Database:
         conn.commit()
 
     @contextmanager
-    def transaction(self):
-        """Context manager for database transactions."""
+    def transaction(self, mode: str = 'DEFERRED'):
+        """
+        Context manager for database transactions.
+        
+        Args:
+            mode: Transaction mode ('DEFERRED', 'IMMEDIATE', 'EXCLUSIVE')
+                  Use 'IMMEDIATE' for write operations to prevent race conditions.
+        """
         conn = self._get_connection()
         try:
+            if mode != 'DEFERRED':
+                conn.execute(f"BEGIN {mode}")
             yield conn
             conn.commit()
         except Exception:

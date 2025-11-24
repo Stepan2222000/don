@@ -4,13 +4,13 @@
 # Лимиты и ограничения
 limits:
   max_messages_per_hour: 1000            # Сообщений в час на профиль
-  max_cycles: 1                        # Количество циклов (проходов по всем чатам)
+  max_cycles: 100                        # Количество циклов (проходов по всем чатам)
   delay_randomness: 0.2                # ±20% к рассчитанной задержке
-  cycle_delay_minutes: 20              # Задержка между циклами (минуты)
+  cycle_delay_minutes: 5              # Задержка между циклами (минуты)
 
 # Таймауты
 timeouts:
-  search_timeout: 10                   # Таймаут поиска чата (секунды)
+  search_timeout: 20                   # Таймаут поиска чата (секунды)
   send_timeout: 5                      # Таймаут отправки сообщения
   page_load_timeout: 30                # Таймаут загрузки страницы
 
@@ -21,7 +21,7 @@ telegram:
 
 # Повторные попытки
 retry:
-  enabled: false                       # Повторять ли неудачные попытки
+  enabled: true                       # Повторять ли неудачные попытки
   max_attempts: 3                      # Максимум попыток
   delay_between_retries: 60            # Задержка между попытками (секунды)
   max_attempts_before_block: 3         # Блокировать чат после N неудачных попыток
@@ -39,7 +39,7 @@ screenshots:
 
 # Логирование
 logging:
-  level: "INFO"                        # DEBUG/INFO/WARNING/ERROR
+  level: "DEBUG"                        # DEBUG/INFO/WARNING/ERROR
   format: "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
 
 # База данных
