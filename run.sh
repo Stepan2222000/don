@@ -12,19 +12,38 @@ else
   exit 1
 fi
 NODE_VERSION="23.11.1"
+OS=$(uname -s)
 ARCH=$(uname -m)
-if [[ "${ARCH}" == "arm64" ]]; then
-  NODE_ARCH="darwin-arm64"
-else
-  NODE_ARCH="darwin-x64"
-fi
-NODE_DIR="${PROJECT_DIR}/.tools/node-v${NODE_VERSION}-${NODE_ARCH}/bin"
+
+# Определяем платформу и архитектуру для Node.js
+case "${OS}" in
+  Darwin)
+    if [[ "${ARCH}" == "arm64" ]]; then
+      NODE_PLATFORM="darwin-arm64"
+    else
+      NODE_PLATFORM="darwin-x64"
+    fi
+    ;;
+  Linux)
+    if [[ "${ARCH}" == "aarch64" ]]; then
+      NODE_PLATFORM="linux-arm64"
+    else
+      NODE_PLATFORM="linux-x64"
+    fi
+    ;;
+  *)
+    echo "[run.sh] Неподдерживаемая платформа: ${OS}" >&2
+    exit 1
+    ;;
+esac
+
+NODE_DIR="${PROJECT_DIR}/.tools/node-v${NODE_VERSION}-${NODE_PLATFORM}/bin"
 COREPACK_DATA="${HOME}/.local/share/corepack"
 
 if [[ ! -d "${NODE_DIR}" ]]; then
   echo "[run.sh] Node ${NODE_VERSION} не найден. Скачиваю автоматически..."
   mkdir -p "${PROJECT_DIR}/.tools"
-  NODE_TAR="node-v${NODE_VERSION}-${NODE_ARCH}.tar.xz"
+  NODE_TAR="node-v${NODE_VERSION}-${NODE_PLATFORM}.tar.xz"
   NODE_URL="https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TAR}"
 
   echo "[run.sh] Скачиваю ${NODE_URL}..."
@@ -40,6 +59,27 @@ if [[ ! -d "${NODE_DIR}" ]]; then
 fi
 
 export PATH="${NODE_DIR}:${COREPACK_DATA}:${PATH}"
+
+# На Linux запускаем через Xvfb (виртуальный дисплей)
+if [[ "${OS}" == "Linux" ]]; then
+  echo "[run.sh] Linux: запускаю через Xvfb (виртуальный дисплей)..."
+
+  # Проверяем наличие Xvfb
+  if ! command -v Xvfb >/dev/null 2>&1; then
+    echo "[run.sh] Xvfb не найден. Установите: sudo apt install xvfb" >&2
+    exit 1
+  fi
+
+  # Запускаем Xvfb на :99 с разрешением 1920x1080
+  Xvfb :99 -screen 0 1920x1080x24 &
+  XVFB_PID=$!
+  export DISPLAY=:99
+
+  # Cleanup Xvfb при выходе
+  trap "kill ${XVFB_PID} 2>/dev/null || true" EXIT
+
+  echo "[run.sh] Xvfb запущен на DISPLAY=${DISPLAY}"
+fi
 
 if ! command -v pnpm >/dev/null 2>&1; then
   echo "[run.sh] pnpm не найден. Устанавливаю через corepack..."
