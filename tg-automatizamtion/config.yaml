@@ -17,7 +17,6 @@ timeouts:
 # Telegram
 telegram:
   url: "https://web.telegram.org/k"
-  headless: false                      # Видимые окна браузера
 
 # Повторные попытки
 retry:

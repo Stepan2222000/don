@@ -38,7 +38,6 @@ class TimeoutsConfig:
 class TelegramConfig:
     """Telegram-specific configuration."""
     url: str = "https://web.telegram.org/k"
-    headless: bool = False
 
 
 @dataclass
