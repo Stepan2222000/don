@@ -1,0 +1,113 @@
+name: Deploy to Servers
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'tg-automatizamtion/**'
+      - 'scripts/**'
+      - 'deploy-servers.json'
+      - '.github/workflows/deploy.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to Production Servers
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass jq
+
+      - name: Deploy to all servers
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          # Проверяем наличие файла конфигурации
+          if [[ ! -f deploy-servers.json ]]; then
+            echo "Error: deploy-servers.json not found"
+            exit 1
+          fi
+
+          # Читаем конфигурацию серверов
+          SERVERS=$(cat deploy-servers.json | jq -c '.servers[]')
+
+          # Счётчики
+          SUCCESS=0
+          FAILED=0
+
+          for SERVER in $SERVERS; do
+            NAME=$(echo $SERVER | jq -r '.name')
+            HOST=$(echo $SERVER | jq -r '.host')
+            PORT=$(echo $SERVER | jq -r '.port // 22')
+            USER=$(echo $SERVER | jq -r '.user')
+            PASS=$(echo $SERVER | jq -r '.password')
+            PATH_DIR=$(echo $SERVER | jq -r '.path')
+
+            echo ""
+            echo "╔══════════════════════════════════════════════════════════════╗"
+            echo "║  Deploying to: $NAME ($HOST)"
+            echo "╚══════════════════════════════════════════════════════════════╝"
+            echo ""
+
+            # Выполняем деплой через SSH с автоматической первоначальной настройкой
+            if sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -p "$PORT" "$USER@$HOST" bash << REMOTE_SCRIPT
+              set -e
+
+              echo "=== Проверка первоначальной настройки ==="
+
+              # Проверяем есть ли git
+              if ! command -v git &> /dev/null; then
+                echo "Установка git..."
+                apt-get update
+                apt-get install -y git
+              fi
+
+              # Проверяем существует ли директория проекта
+              if [[ ! -d "$PATH_DIR/.git" ]]; then
+                echo "Первый запуск: клонирование репозитория..."
+                mkdir -p "$(dirname "$PATH_DIR")"
+                git clone "$REPO_URL" "$PATH_DIR"
+                cd "$PATH_DIR"
+                chmod +x scripts/*.sh
+                echo "Репозиторий склонирован!"
+              else
+                echo "Репозиторий уже существует"
+              fi
+
+              # Запускаем деплой
+              cd "$PATH_DIR"
+              chmod +x scripts/*.sh
+              ./scripts/deploy.sh
+REMOTE_SCRIPT
+            then
+              echo ""
+              echo "✓ Successfully deployed to $NAME"
+              ((SUCCESS++))
+            else
+              echo ""
+              echo "✗ Failed to deploy to $NAME"
+              ((FAILED++))
+            fi
+
+            echo ""
+          done
+
+          # Итоговый отчёт
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  Deployment Summary"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  Successful: $SUCCESS"
+          echo "║  Failed: $FAILED"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+
+          # Выходим с ошибкой если есть неудачные деплои
+          if [[ $FAILED -gt 0 ]]; then
+            exit 1
+          fi

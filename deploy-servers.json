@@ -1,0 +1,12 @@
+{
+  "servers": [
+    {
+      "name": "production",
+      "host": "81.30.105.134",
+      "port": 22,
+      "user": "root",
+      "password": "6w&6HhfQ$c12",
+      "path": "/root/don"
+    }
+  ]
+}

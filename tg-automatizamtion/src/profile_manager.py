@@ -7,9 +7,25 @@ Reads profile metadata and provides access to profile information.
 
 import json
 import os
+import platform
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
+
+
+def get_default_profiles_dir() -> str:
+    """
+    Get default Donut Browser profiles directory based on OS.
+
+    Returns:
+        Path to profiles directory:
+        - macOS: ~/Library/Application Support/DonutBrowserDev/profiles/
+        - Linux: ~/.local/share/DonutBrowserDev/profiles/
+    """
+    if platform.system() == "Darwin":
+        return os.path.expanduser("~/Library/Application Support/DonutBrowserDev/profiles")
+    else:  # Linux and others
+        return os.path.expanduser("~/.local/share/DonutBrowserDev/profiles")
 
 
 @dataclass
@@ -50,10 +66,10 @@ class ProfileManager:
 
         Args:
             profiles_dir: Path to Donut Browser profiles directory.
-                         Defaults to ~/Library/Application Support/DonutBrowserDev/profiles/
+                         Defaults to OS-specific path (see get_default_profiles_dir()).
         """
         if profiles_dir is None:
-            profiles_dir = os.path.expanduser("~/Library/Application Support/DonutBrowserDev/profiles")
+            profiles_dir = get_default_profiles_dir()
 
         self.profiles_dir = Path(profiles_dir)
 
