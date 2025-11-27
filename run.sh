@@ -11,30 +11,48 @@ else
   echo "[run.sh] Не удалось найти директорию проекта donutbrowser относительно ${SCRIPT_DIR}" >&2
   exit 1
 fi
-NODE_DIR="${PROJECT_DIR}/.tools/node-v23.11.1-darwin-arm64/bin"
+NODE_VERSION="23.11.1"
+ARCH=$(uname -m)
+if [[ "${ARCH}" == "arm64" ]]; then
+  NODE_ARCH="darwin-arm64"
+else
+  NODE_ARCH="darwin-x64"
+fi
+NODE_DIR="${PROJECT_DIR}/.tools/node-v${NODE_VERSION}-${NODE_ARCH}/bin"
 COREPACK_DATA="${HOME}/.local/share/corepack"
 
 if [[ ! -d "${NODE_DIR}" ]]; then
-  cat <<MSG
-[run.sh] Node 23.11.1 не найден в ${PROJECT_DIR}/.tools.
-Запусти из директории проекта:
-  curl -L https://nodejs.org/dist/v23.11.1/node-v23.11.1-darwin-arm64.tar.xz -o .tools/node-v23.11.1.tar.xz
-  tar -xf .tools/node-v23.11.1.tar.xz -C .tools
-MSG
-  exit 1
+  echo "[run.sh] Node ${NODE_VERSION} не найден. Скачиваю автоматически..."
+  mkdir -p "${PROJECT_DIR}/.tools"
+  NODE_TAR="node-v${NODE_VERSION}-${NODE_ARCH}.tar.xz"
+  NODE_URL="https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TAR}"
+
+  echo "[run.sh] Скачиваю ${NODE_URL}..."
+  curl -L "${NODE_URL}" -o "${PROJECT_DIR}/.tools/${NODE_TAR}"
+
+  echo "[run.sh] Распаковываю..."
+  tar -xf "${PROJECT_DIR}/.tools/${NODE_TAR}" -C "${PROJECT_DIR}/.tools"
+
+  echo "[run.sh] Удаляю архив..."
+  rm "${PROJECT_DIR}/.tools/${NODE_TAR}"
+
+  echo "[run.sh] Node ${NODE_VERSION} установлен успешно!"
 fi
 
 export PATH="${NODE_DIR}:${COREPACK_DATA}:${PATH}"
 
 if ! command -v pnpm >/dev/null 2>&1; then
-  echo "[run.sh] pnpm не найден. Установи corepack или pnpm вручную." >&2
-  exit 1
+  echo "[run.sh] pnpm не найден. Устанавливаю через corepack..."
+  corepack enable
+  corepack prepare pnpm@latest --activate
 fi
 
 cd "${PROJECT_DIR}"
 
-# Завершаю предыдущие процессы Donut Browser
-pkill -f "${PROJECT_DIR}" >/dev/null 2>&1 || true
+# Завершаю предыдущие процессы Donut Browser (только tauri/next dev)
+pkill -f "tauri dev" >/dev/null 2>&1 || true
+pkill -f "next dev" >/dev/null 2>&1 || true
+pkill -f "target/debug/donutbrowser" >/dev/null 2>&1 || true
 
 # Освобождаем порт 3000, чтобы Tauri смог достучаться до Next.js
 PORT=3000
