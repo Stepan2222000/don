@@ -1,0 +1,1 @@
+/Users/stepanorlov/Desktop/STERTED/don/scripts/sync-profiles-to-server.sh

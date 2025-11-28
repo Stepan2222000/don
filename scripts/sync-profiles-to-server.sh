@@ -9,10 +9,15 @@
 
 set -e
 
+# Очистка при выходе
+trap 'rm -rf /tmp/donut_profiles_sync 2>/dev/null' EXIT
+
 # === КОНФИГУРАЦИЯ (можно изменить) ===
 LOCAL_PROFILES_DIR="$HOME/Library/Application Support/DonutBrowserDev/profiles"
 REMOTE_PROFILES_DIR="\$HOME/.local/share/DonutBrowserDev/profiles"
-REMOTE_BINARIES_DIR="\$HOME/.local/share/DonutBrowserDev/binaries"
+# Camoufox устанавливается через pip в ~/.cache/camoufox/
+REMOTE_CAMOUFOX_PATH="\$HOME/.cache/camoufox/camoufox"
+TEMP_DIR="/tmp/donut_profiles_sync"
 # =====================================
 
 # Цвета для вывода
@@ -68,14 +73,10 @@ scp_cmd() {
     sshpass -p "$SERVER_PASS" scp -o StrictHostKeyChecking=no -r "$1" "$SERVER_USER@$SERVER_IP:$2"
 }
 
-# Rsync команда с паролем (если доступен)
-rsync_cmd() {
-    if command -v rsync &> /dev/null; then
-        sshpass -p "$SERVER_PASS" rsync -avz --progress --exclude='cache2/' --exclude='.parentlock' \
-            -e "ssh -o StrictHostKeyChecking=no" "$1" "$SERVER_USER@$SERVER_IP:$2"
-        return 0
-    else
-        return 1
+# Очистка временных файлов
+cleanup() {
+    if [[ -d "$TEMP_DIR" ]]; then
+        rm -rf "$TEMP_DIR"
     fi
 }
 
@@ -158,21 +159,109 @@ get_remote_profiles() {
 
 # Отображение меню
 show_menu() {
-    echo ""
-    echo -e "${CYAN}=== Режим копирования ===${NC}"
-    echo ""
-    echo "  1) Все профили (полная замена на сервере)"
-    echo "  2) Только новые профили (которых нет на сервере)"
-    echo "  3) Выбрать конкретные профили (с заменой)"
-    echo "  4) Выбрать конкретные профили (только если их нет)"
-    echo "  0) Выход"
-    echo ""
-    read -p "Выберите режим [1-4]: " mode
+    echo "" >&2
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}" >&2
+    echo -e "${CYAN}║              Выберите режим копирования                    ║${NC}" >&2
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}" >&2
+    echo "" >&2
+    echo -e "  ${GREEN}1)${NC} Скопировать ВСЕ профили" >&2
+    echo -e "     ${YELLOW}→ Перезапишет существующие профили на сервере${NC}" >&2
+    echo -e "     ${YELLOW}→ Используйте для полной синхронизации${NC}" >&2
+    echo "" >&2
+    echo -e "  ${GREEN}2)${NC} Только НОВЫЕ профили" >&2
+    echo -e "     ${YELLOW}→ Копирует только те, которых нет на сервере${NC}" >&2
+    echo -e "     ${YELLOW}→ Существующие профили не трогает${NC}" >&2
+    echo "" >&2
+    echo -e "  ${GREEN}3)${NC} Выбрать вручную (с заменой)" >&2
+    echo -e "     ${YELLOW}→ Покажет список, вы выберете какие копировать${NC}" >&2
+    echo -e "     ${YELLOW}→ Перезапишет если профиль уже есть на сервере${NC}" >&2
+    echo "" >&2
+    echo -e "  ${GREEN}4)${NC} Выбрать вручную (без замены)" >&2
+    echo -e "     ${YELLOW}→ Покажет только профили, которых нет на сервере${NC}" >&2
+    echo -e "     ${YELLOW}→ Существующие профили пропускаются${NC}" >&2
+    echo "" >&2
+    echo -e "  ${RED}0)${NC} Выход" >&2
+    echo "" >&2
+    read -p "Выберите режим [0-4]: " mode
     echo "$mode"
 }
 
 # Отображение списка профилей для выбора
 select_profiles() {
+    local profiles_str="$1"
+    local filter_existing="$2"  # "yes" или "no"
+    local remote_profiles="$3"
+
+    IFS=' ' read -ra profiles <<< "$profiles_str"
+    local selected=()
+
+    echo "" >&2
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}" >&2
+    echo -e "${CYAN}║                   Доступные профили                        ║${NC}" >&2
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}" >&2
+    echo "" >&2
+
+    local display_profiles=()
+    local profile_names=()
+
+    for profile in "${profiles[@]}"; do
+        local uuid="${profile%%|*}"
+        local name="${profile##*|}"
+        local status=""
+
+        if echo "$remote_profiles" | grep -q "^${uuid}$"; then
+            if [[ "$filter_existing" == "yes" ]]; then
+                continue  # Пропускаем существующие
+            fi
+            status="${YELLOW}(на сервере)${NC}"
+        else
+            status="${GREEN}(новый)${NC}"
+        fi
+
+        display_profiles+=("$profile")
+        profile_names+=("$name")
+        echo -e "  ${GREEN}•${NC} ${CYAN}$name${NC} $status" >&2
+    done
+
+    if [[ ${#display_profiles[@]} -eq 0 ]]; then
+        log_warning "Нет профилей для копирования" >&2
+        return
+    fi
+
+    echo "" >&2
+    echo -e "  ${GREEN}all${NC} - Выбрать все профили" >&2
+    echo -e "  ${RED}0${NC}   - Отмена" >&2
+    echo "" >&2
+    echo -e "${YELLOW}Введите названия профилей через пробел или 'all' для всех:${NC}" >&2
+    read -p "> " selection
+
+    if [[ "$selection" == "0" ]]; then
+        return
+    fi
+
+    if [[ "$selection" == "all" || "$selection" == "ALL" ]]; then
+        for profile in "${display_profiles[@]}"; do
+            echo "${profile%%|*}"
+        done
+        return
+    fi
+
+    # Поиск по именам
+    for input_name in $selection; do
+        for profile in "${display_profiles[@]}"; do
+            local uuid="${profile%%|*}"
+            local name="${profile##*|}"
+            # Поиск по частичному совпадению (без учета регистра)
+            if [[ "${name,,}" == *"${input_name,,}"* ]]; then
+                echo "$uuid"
+                break
+            fi
+        done
+    done
+}
+
+# Старая функция для совместимости (выбор по номерам)
+select_profiles_by_number() {
     local profiles_str="$1"
     local filter_existing="$2"  # "yes" или "no"
     local remote_profiles="$3"
@@ -236,7 +325,7 @@ select_profiles() {
     done
 }
 
-# Копирование одного профиля
+# Копирование одного профиля через tar-архив (надёжнее чем rsync/scp)
 copy_profile() {
     local uuid="$1"
     local local_path="$LOCAL_PROFILES_DIR/$uuid"
@@ -247,20 +336,42 @@ copy_profile() {
 
     log_info "Копирование профиля: $name [$uuid]"
 
-    # Удаляем .parentlock локально перед копированием
+    # Удаляем .parentlock локально перед архивацией
     rm -f "$local_path/profile/.parentlock" 2>/dev/null || true
 
-    # Копируем через rsync (если есть) или scp
-    if rsync_cmd "$local_path/" "$remote_path/"; then
-        log_success "Профиль скопирован через rsync"
-    else
-        log_info "rsync недоступен, используем scp..."
-        scp_cmd "$local_path" "$remote_profiles_expanded/"
-        log_success "Профиль скопирован через scp"
-    fi
+    # Создаём локальную временную директорию
+    mkdir -p "$TEMP_DIR"
+    local archive_name="${uuid}.tar.gz"
+    local local_archive="$TEMP_DIR/$archive_name"
 
-    # Удаляем .parentlock на сервере (на всякий случай)
+    # Создаём tar-архив (COPYFILE_DISABLE для macOS - исключает ._ файлы)
+    log_info "Создание tar-архива..."
+    cd "$LOCAL_PROFILES_DIR"
+    COPYFILE_DISABLE=1 tar -czf "$local_archive" "$uuid"
+
+    local archive_size=$(du -h "$local_archive" | cut -f1)
+    log_info "Размер архива: $archive_size"
+
+    # Удаляем старый профиль на сервере если есть
+    ssh_cmd "rm -rf '$remote_path'" 2>/dev/null || true
+
+    # Копируем архив на сервер (один файл - надёжнее)
+    log_info "Копирование архива на сервер..."
+    scp_cmd "$local_archive" "/tmp/"
+
+    # Распаковываем на сервере
+    log_info "Распаковка на сервере..."
+    ssh_cmd "cd '$remote_profiles_expanded' && tar -xzf /tmp/$archive_name && rm /tmp/$archive_name"
+
+    # Удаляем локальный архив
+    rm -f "$local_archive"
+
+    # Удаляем .parentlock на сервере
     ssh_cmd "rm -f '$remote_path/profile/.parentlock'" 2>/dev/null || true
+
+    # Проверяем что профиль скопирован
+    local remote_files=$(ssh_cmd "find '$remote_path' -type f | wc -l")
+    log_success "Профиль скопирован ($remote_files файлов)"
 
     # Адаптируем пути
     adapt_paths "$uuid"
@@ -270,25 +381,28 @@ copy_profile() {
 adapt_paths() {
     local uuid="$1"
     local remote_profiles_expanded="${REMOTE_PROFILES_DIR//\$HOME/$REMOTE_HOME}"
-    local remote_binaries_expanded="${REMOTE_BINARIES_DIR//\$HOME/$REMOTE_HOME}"
+    local remote_camoufox_expanded="${REMOTE_CAMOUFOX_PATH//\$HOME/$REMOTE_HOME}"
     local remote_path="$remote_profiles_expanded/$uuid"
 
     log_info "Адаптация путей для Linux..."
 
-    # Получаем версию браузера из metadata.json
-    local version=$(ssh_cmd "grep -o '\"version\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' '$remote_path/metadata.json' | sed 's/\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\"/\1/'")
+    # Проверяем что camoufox установлен на сервере
+    if ! ssh_cmd "test -f '$remote_camoufox_expanded'"; then
+        log_warning "Camoufox не найден на сервере: $remote_camoufox_expanded"
+        log_warning "Установите его: pip install camoufox && python -c 'import camoufox; camoufox.install()'"
+    fi
 
-    # Обновляем executable_path в metadata.json
-    local new_executable="$remote_binaries_expanded/camoufox/$version/camoufox"
-
-    ssh_cmd "sed -i 's|\"executable_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"executable_path\": \"$new_executable\"|g' '$remote_path/metadata.json'"
+    # Обновляем executable_path в metadata.json на путь к camoufox
+    # Заменяем любой macOS путь на Linux путь к camoufox
+    ssh_cmd "sed -i 's|\"executable_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"executable_path\": \"$remote_camoufox_expanded\"|g' '$remote_path/metadata.json'"
 
     # Обновляем путь к proxy.pac в user.js (если файл существует)
     local new_proxy_path="file://$remote_path/proxy.pac"
-
     ssh_cmd "if [ -f '$remote_path/profile/user.js' ]; then sed -i 's|file://[^\"]*proxy.pac|$new_proxy_path|g' '$remote_path/profile/user.js'; fi"
 
-    log_success "Пути адаптированы"
+    # Проверяем результат
+    local new_path=$(ssh_cmd "grep -o '\"executable_path\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' '$remote_path/metadata.json'" 2>/dev/null)
+    log_success "Пути адаптированы: $new_path"
 }
 
 # Основная функция

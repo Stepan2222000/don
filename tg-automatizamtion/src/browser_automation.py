@@ -15,6 +15,7 @@ from playwright.sync_api import sync_playwright, Browser, Page, PlaywrightContex
 
 from .profile_manager import DonutProfile
 from .logger import get_logger
+from .config import get_config
 
 
 def _verify_telegram_loaded(page: Page, logger) -> tuple[bool, list[str]]:
@@ -232,10 +233,11 @@ class BrowserAutomation:
             proxy_config = {"server": profile.proxy} if profile.proxy else None
 
             # Launch persistent context with fingerprint
+            config = get_config()
             self.context = self.playwright.firefox.launch_persistent_context(
                 user_data_dir=str(profile.browser_data_path),
                 executable_path=profile.executable_path,
-                headless=False,
+                headless=config.telegram.headless,
                 proxy=proxy_config,
                 env=env_vars,
             )
@@ -362,11 +364,12 @@ class BrowserAutomationSimplified:
 
         # Launch persistent context with fingerprint
         proxy_config = {"server": profile.proxy} if profile.proxy else None
+        config = get_config()
 
         self.context = self.playwright.firefox.launch_persistent_context(
             user_data_dir=str(profile.browser_data_path),
             executable_path=profile.executable_path,
-            headless=False,
+            headless=config.telegram.headless,
             proxy=proxy_config,
             env=env_vars,
         )
