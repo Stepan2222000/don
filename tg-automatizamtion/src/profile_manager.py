@@ -19,9 +19,14 @@ def get_default_profiles_dir() -> str:
 
     Returns:
         Path to profiles directory:
+        - If DONUTBROWSER_DATA_DIR is set: $DONUTBROWSER_DATA_DIR/profiles/
         - macOS: ~/Library/Application Support/DonutBrowserDev/profiles/
         - Linux: ~/.local/share/DonutBrowserDev/profiles/
     """
+    # Check for data directory override first
+    if override_dir := os.environ.get("DONUTBROWSER_DATA_DIR"):
+        return os.path.join(override_dir, "profiles")
+
     if platform.system() == "Darwin":
         return os.path.expanduser("~/Library/Application Support/DonutBrowserDev/profiles")
     else:  # Linux and others

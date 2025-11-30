@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+# Добавляем Rust в PATH если установлен
+[[ -d "${HOME}/.cargo/bin" ]] && export PATH="${HOME}/.cargo/bin:${PATH}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ -f "${SCRIPT_DIR}/package.json" && -d "${SCRIPT_DIR}/src-tauri" ]]; then
@@ -11,6 +14,10 @@ else
   echo "[run.sh] Не удалось найти директорию проекта donutbrowser относительно ${SCRIPT_DIR}" >&2
   exit 1
 fi
+
+# Переопределяем директорию данных (профили будут в PROJECT_DIR/data/profiles/)
+export DONUTBROWSER_DATA_DIR="${PROJECT_DIR}/data"
+
 NODE_VERSION="23.11.1"
 OS=$(uname -s)
 ARCH=$(uname -m)
@@ -89,13 +96,13 @@ fi
 
 cd "${PROJECT_DIR}"
 
-# Завершаю предыдущие процессы Donut Browser (только tauri/next dev)
-pkill -f "tauri dev" >/dev/null 2>&1 || true
-pkill -f "next dev" >/dev/null 2>&1 || true
-pkill -f "target/debug/donutbrowser" >/dev/null 2>&1 || true
+# Завершаю предыдущие процессы Donut Browser (только для этого проекта)
+pkill -f "${PROJECT_DIR}.*tauri dev" >/dev/null 2>&1 || true
+pkill -f "${PROJECT_DIR}.*next dev" >/dev/null 2>&1 || true
+pkill -f "${PROJECT_DIR}/src-tauri/target/debug/donutbrowser" >/dev/null 2>&1 || true
 
-# Освобождаем порт 3000, чтобы Tauri смог достучаться до Next.js
-PORT=3000
+# Освобождаем порт 3001, чтобы Tauri смог достучаться до Next.js
+PORT=3001
 busy_pids=$(lsof -tiTCP:${PORT} -sTCP:LISTEN || true)
 if [[ -n "${busy_pids}" ]]; then
   echo "[run.sh] Завершаю процессы на порту ${PORT}: ${busy_pids}"
