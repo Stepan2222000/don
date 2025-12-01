@@ -7,7 +7,6 @@ Reads profile metadata and provides access to profile information.
 
 import json
 import os
-import platform
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -20,17 +19,29 @@ def get_default_profiles_dir() -> str:
     Returns:
         Path to profiles directory:
         - If DONUTBROWSER_DATA_DIR is set: $DONUTBROWSER_DATA_DIR/profiles/
-        - macOS: ~/Library/Application Support/DonutBrowserDev/profiles/
-        - Linux: ~/.local/share/DonutBrowserDev/profiles/
+        - Default: ~/Desktop/STERTED/don/donutbrowser/data/profiles/
     """
     # Check for data directory override first
     if override_dir := os.environ.get("DONUTBROWSER_DATA_DIR"):
         return os.path.join(override_dir, "profiles")
 
-    if platform.system() == "Darwin":
-        return os.path.expanduser("~/Library/Application Support/DonutBrowserDev/profiles")
-    else:  # Linux and others
-        return os.path.expanduser("~/.local/share/DonutBrowserDev/profiles")
+    # Default to local donutbrowser project data directory
+    return os.path.expanduser("~/Desktop/STERTED/don/donutbrowser/data/profiles")
+
+
+def get_default_proxies_dir() -> str:
+    """
+    Get default Donut Browser proxies directory.
+
+    Returns:
+        Path to proxies directory:
+        - If DONUTBROWSER_DATA_DIR is set: $DONUTBROWSER_DATA_DIR/proxies/
+        - Default: ~/Desktop/STERTED/don/donutbrowser/data/proxies/
+    """
+    if override_dir := os.environ.get("DONUTBROWSER_DATA_DIR"):
+        return os.path.join(override_dir, "proxies")
+
+    return os.path.expanduser("~/Desktop/STERTED/don/donutbrowser/data/proxies")
 
 
 @dataclass
@@ -65,18 +76,24 @@ class DonutProfile:
 class ProfileManager:
     """Manager for Donut Browser profiles."""
 
-    def __init__(self, profiles_dir: Optional[str] = None):
+    def __init__(self, profiles_dir: Optional[str] = None, proxies_dir: Optional[str] = None):
         """
         Initialize profile manager.
 
         Args:
             profiles_dir: Path to Donut Browser profiles directory.
                          Defaults to OS-specific path (see get_default_profiles_dir()).
+            proxies_dir: Path to Donut Browser proxies directory.
+                        Defaults to OS-specific path (see get_default_proxies_dir()).
         """
         if profiles_dir is None:
             profiles_dir = get_default_profiles_dir()
 
+        if proxies_dir is None:
+            proxies_dir = get_default_proxies_dir()
+
         self.profiles_dir = Path(profiles_dir)
+        self.proxies_dir = Path(proxies_dir)
 
         if not self.profiles_dir.exists():
             raise FileNotFoundError(
@@ -111,6 +128,49 @@ class ProfileManager:
 
         return sorted(profiles, key=lambda p: p.profile_name)
 
+    def _load_proxy(self, proxy_id: str) -> Optional[str]:
+        """
+        Load proxy configuration by ID and return proxy URL string.
+
+        Args:
+            proxy_id: UUID of the proxy
+
+        Returns:
+            Proxy URL string (e.g., "http://user:pass@host:port") or None if not found
+        """
+        if not proxy_id:
+            return None
+
+        proxy_file = self.proxies_dir / f"{proxy_id}.json"
+        if not proxy_file.exists():
+            print(f"Warning: Proxy file not found: {proxy_file}")
+            return None
+
+        try:
+            with open(proxy_file, 'r', encoding='utf-8') as f:
+                proxy_data = json.load(f)
+
+            settings = proxy_data.get('proxy_settings', {})
+            proxy_type = settings.get('proxy_type', 'http')
+            host = settings.get('host')
+            port = settings.get('port')
+            username = settings.get('username')
+            password = settings.get('password')
+
+            if not host or not port:
+                print(f"Warning: Proxy missing host or port: {proxy_id}")
+                return None
+
+            # Build proxy URL
+            if username and password:
+                return f"{proxy_type}://{username}:{password}@{host}:{port}"
+            else:
+                return f"{proxy_type}://{host}:{port}"
+
+        except Exception as e:
+            print(f"Warning: Failed to load proxy {proxy_id}: {e}")
+            return None
+
     def _load_profile(self, profile_dir: Path, metadata_file: Path) -> DonutProfile:
         """Load profile from metadata.json."""
         with open(metadata_file, 'r', encoding='utf-8') as f:
@@ -118,6 +178,14 @@ class ProfileManager:
 
         # Extract camoufox config
         camoufox_config = metadata.get('camoufox_config', {})
+
+        # Get proxy - first try camoufox_config.proxy, then resolve from proxy_id
+        proxy = camoufox_config.get('proxy')
+        proxy_id = metadata.get('proxy_id')
+
+        if not proxy and proxy_id:
+            # Resolve proxy from separate proxy file
+            proxy = self._load_proxy(proxy_id)
 
         return DonutProfile(
             profile_id=metadata.get('id'),
@@ -129,8 +197,8 @@ class ProfileManager:
             browser_data_path=profile_dir / "profile",
             executable_path=camoufox_config.get('executable_path'),
             fingerprint=camoufox_config.get('fingerprint'),
-            proxy=camoufox_config.get('proxy'),
-            proxy_id=metadata.get('proxy_id'),
+            proxy=proxy,
+            proxy_id=proxy_id,
             process_id=metadata.get('process_id'),
             last_launch=metadata.get('last_launch'),
             release_type=metadata.get('release_type', 'stable'),

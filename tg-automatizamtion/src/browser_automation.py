@@ -18,6 +18,74 @@ from .logger import get_logger
 from .config import get_config
 
 
+class QRCodePageDetectedError(Exception):
+    """Raised when QR code login page is detected (session expired)."""
+    pass
+
+
+def _parse_proxy_url(proxy_url: str) -> dict:
+    """
+    Parse proxy URL into Playwright proxy config format.
+
+    Playwright requires separate username/password fields, not embedded in URL.
+
+    Args:
+        proxy_url: Proxy URL like "http://user:pass@host:port"
+
+    Returns:
+        Dict with server, username, password keys for Playwright
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(proxy_url)
+
+    # Build server URL without credentials
+    server = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+
+    config = {"server": server}
+
+    if parsed.username:
+        config["username"] = parsed.username
+    if parsed.password:
+        config["password"] = parsed.password
+
+    return config
+
+
+def _check_qr_code_page(page: Page, logger) -> bool:
+    """
+    Check if current page is QR code login page (session expired).
+
+    QR code page selectors based on Telegram Web K:
+    - .page-signQR.active - QR code sign-in page with active class
+    - #auth-pages - Authentication pages container (visible)
+    - .qr-description - QR code description text
+
+    Args:
+        page: Playwright Page object
+        logger: Logger instance
+
+    Returns:
+        True if QR code page detected, False otherwise
+    """
+    qr_selectors = [
+        ".page-signQR.active",
+        "#auth-pages:not([style*='display: none'])",
+        ".qr-description",
+    ]
+
+    for selector in qr_selectors:
+        try:
+            locator = page.locator(selector)
+            if locator.count() > 0 and locator.first.is_visible():
+                logger.warning(f"QR code page detected (selector: {selector})")
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
 def _verify_telegram_loaded(page: Page, logger) -> tuple[bool, list[str]]:
     """
     Verify that Telegram UI has loaded properly.
@@ -104,6 +172,22 @@ def _load_telegram_with_retry(page: Page, url: str, logger, max_retries: int = 3
         # Additional wait for React to render UI (increased from 5s to 15s)
         logger.debug("Waiting for React UI to render...")
         page.wait_for_timeout(15000)
+
+        # CHECK FOR QR CODE PAGE FIRST (session expired)
+        # This should NOT be retried - user needs to re-login manually
+        if _check_qr_code_page(page, logger):
+            logger.error("Session expired - QR code login page detected")
+            # Save screenshot for debugging
+            try:
+                screenshot_dir = Path("logs/screenshots")
+                screenshot_dir.mkdir(parents=True, exist_ok=True)
+                screenshot_path = screenshot_dir / "qr_code_page_detected.png"
+                page.screenshot(path=str(screenshot_path))
+                logger.info(f"QR code screenshot saved: {screenshot_path}")
+            except Exception as e:
+                logger.error(f"Failed to save QR screenshot: {e}")
+            # Raise specific exception (not retry)
+            raise QRCodePageDetectedError("Profile session expired - QR code login required")
 
         # Verify Telegram UI loaded (check for critical elements)
         is_loaded, missing_elements = _verify_telegram_loaded(page, logger)
@@ -230,7 +314,8 @@ class BrowserAutomation:
             self.playwright = sync_playwright().start()
 
             # Prepare proxy config
-            proxy_config = {"server": profile.proxy} if profile.proxy else None
+            # Playwright requires separate username/password, not embedded in URL
+            proxy_config = _parse_proxy_url(profile.proxy) if profile.proxy else None
 
             # Launch persistent context with fingerprint
             config = get_config()
@@ -363,7 +448,8 @@ class BrowserAutomationSimplified:
         self.playwright = sync_playwright().start()
 
         # Launch persistent context with fingerprint
-        proxy_config = {"server": profile.proxy} if profile.proxy else None
+        # Playwright requires separate username/password, not embedded in URL
+        proxy_config = _parse_proxy_url(profile.proxy) if profile.proxy else None
         config = get_config()
 
         self.context = self.playwright.firefox.launch_persistent_context(

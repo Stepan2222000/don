@@ -119,12 +119,12 @@ class Database:
             return cursor.fetchone()[0]
 
     def get_active_profiles(self) -> List[Dict[str, Any]]:
-        """Get all active profiles."""
+        """Get all active profiles (excluding blocked and logged out)."""
         conn = self._get_connection()
         cursor = conn.execute(
             """
             SELECT * FROM profiles
-            WHERE is_active = 1 AND is_blocked = 0
+            WHERE is_active = 1 AND is_blocked = 0 AND is_logged_out = 0
             ORDER BY profile_name
             """
         )
@@ -147,6 +147,18 @@ class Database:
                 """
                 UPDATE profiles
                 SET is_blocked = 1, is_active = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE profile_id = ?
+                """,
+                (profile_id,)
+            )
+
+    def mark_profile_logged_out(self, profile_id: str):
+        """Mark profile as logged out (QR code page detected, session expired)."""
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE profiles
+                SET is_logged_out = 1, is_active = 0, updated_at = CURRENT_TIMESTAMP
                 WHERE profile_id = ?
                 """,
                 (profile_id,)

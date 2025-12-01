@@ -117,6 +117,11 @@ class WorkerManager:
             logger.warning(f"Not restarting worker {profile_id}: account banned (exit code 3)")
             return False
 
+        # Don't restart on session expired / logged out (exit code 4)
+        if exit_code == 4:
+            logger.warning(f"Not restarting worker {profile_id}: session expired - re-login required (exit code 4)")
+            return False
+
         # Check restart cooldown period
         current_time = time.time()
         last_restart_time = self.last_restart_times.get(profile_id, 0)

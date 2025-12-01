@@ -14,7 +14,7 @@ from .config import load_config, get_config, DEFAULT_CONFIG_PATH
 from .database import init_database, get_database
 from .logger import init_logger, get_logger
 from .profile_manager import get_profile_manager, init_profile_manager, DonutProfile
-from .browser_automation import BrowserAutomation, BrowserAutomationSimplified
+from .browser_automation import BrowserAutomation, BrowserAutomationSimplified, QRCodePageDetectedError
 from .telegram_sender import TelegramSender
 from .task_queue import get_task_queue
 from .error_handler import ErrorHandler
@@ -135,6 +135,13 @@ class Worker:
                     # Small delay even on failure
                     time.sleep(2)
 
+        except QRCodePageDetectedError as e:
+            # Session expired - QR code page detected
+            self.logger.error(f"Session expired for {self.profile.profile_name}: {e}")
+            # Mark profile as logged out in database
+            self.db.mark_profile_logged_out(self.profile.profile_id)
+            self.exit_code = 4  # Session expired exit code (don't restart)
+            self.exit_reason = "session_expired"
         except KeyboardInterrupt:
             self.logger.warning("Worker interrupted by user (Ctrl+C)")
             self.exit_code = 0  # Graceful shutdown

@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     profile_name TEXT NOT NULL,                -- Название профиля
     is_active BOOLEAN DEFAULT 1,               -- Участвует ли в рассылке
     is_blocked BOOLEAN DEFAULT 0,              -- Заблокирован ли Telegram в профиле
+    is_logged_out BOOLEAN DEFAULT 0,           -- Сессия истекла (показан QR-код)
     messages_sent_current_hour INTEGER DEFAULT 0,
     hour_reset_time TIMESTAMP,                 -- Время сброса счетчика
     last_message_time TIMESTAMP,               -- Время последней отправки
@@ -182,13 +183,14 @@ SELECT
     p.profile_name,
     p.is_active,
     p.is_blocked,
+    p.is_logged_out,
     COUNT(DISTINCT ta.task_id) as tasks_processed,
     SUM(CASE WHEN ta.status = 'success' THEN 1 ELSE 0 END) as successful_sends,
     SUM(CASE WHEN ta.status = 'failed' THEN 1 ELSE 0 END) as failed_sends,
     p.last_message_time
 FROM profiles p
 LEFT JOIN task_attempts ta ON ta.profile_id = p.profile_id
-GROUP BY p.profile_id, p.profile_name, p.is_active, p.is_blocked, p.last_message_time;
+GROUP BY p.profile_id, p.profile_name, p.is_active, p.is_blocked, p.is_logged_out, p.last_message_time;
 
 -- Прогресс по задачам
 CREATE VIEW IF NOT EXISTS task_progress AS
