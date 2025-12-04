@@ -19,14 +19,15 @@ def get_default_profiles_dir() -> str:
     Returns:
         Path to profiles directory:
         - If DONUTBROWSER_DATA_DIR is set: $DONUTBROWSER_DATA_DIR/profiles/
-        - Default: ~/Desktop/STERTED/don/donutbrowser/data/profiles/
+        - Default: PROJECT_ROOT/../donutbrowser/data/profiles/
     """
     # Check for data directory override first
     if override_dir := os.environ.get("DONUTBROWSER_DATA_DIR"):
         return os.path.join(override_dir, "profiles")
 
-    # Default to local donutbrowser project data directory
-    return os.path.expanduser("~/Desktop/STERTED/don/donutbrowser/data/profiles")
+    # Default: relative to project root
+    from .config import PROJECT_ROOT
+    return str(PROJECT_ROOT.parent / "donutbrowser" / "data" / "profiles")
 
 
 def get_default_proxies_dir() -> str:
@@ -36,12 +37,14 @@ def get_default_proxies_dir() -> str:
     Returns:
         Path to proxies directory:
         - If DONUTBROWSER_DATA_DIR is set: $DONUTBROWSER_DATA_DIR/proxies/
-        - Default: ~/Desktop/STERTED/don/donutbrowser/data/proxies/
+        - Default: PROJECT_ROOT/../donutbrowser/data/proxies/
     """
     if override_dir := os.environ.get("DONUTBROWSER_DATA_DIR"):
         return os.path.join(override_dir, "proxies")
 
-    return os.path.expanduser("~/Desktop/STERTED/don/donutbrowser/data/proxies")
+    # Default: relative to project root
+    from .config import PROJECT_ROOT
+    return str(PROJECT_ROOT.parent / "donutbrowser" / "data" / "proxies")
 
 
 @dataclass
