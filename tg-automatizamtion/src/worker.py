@@ -18,6 +18,8 @@ from .browser_automation import BrowserAutomation, BrowserAutomationSimplified, 
 from .telegram_sender import TelegramSender
 from .task_queue import get_task_queue
 from .error_handler import ErrorHandler
+from .proxy_manager import get_proxy_manager
+from .proxy_health import get_health_monitor
 
 
 class Worker:
@@ -53,6 +55,11 @@ class Worker:
         self.telegram = None
         self.error_handler = None
 
+        # Proxy management
+        self.proxy_manager = get_proxy_manager()
+        self.health_monitor = get_health_monitor()
+        self.current_proxy_url = None
+
         # Track current task for cleanup on interruption
         self.current_task_id = None
 
@@ -73,6 +80,14 @@ class Worker:
         self.logger.log_worker_start(self.profile.profile_name, self.profile.profile_id)
 
         try:
+            # Get proxy for profile
+            proxy = self.proxy_manager.get_or_assign_proxy(self.profile.profile_id)
+            if proxy:
+                self.current_proxy_url = proxy.url
+                self.logger.info(f"Using proxy: {proxy.host}:{proxy.port}")
+            else:
+                self.logger.warning("No proxy assigned to profile")
+
             # Launch browser
             self.logger.info(f"Launching browser for profile: {self.profile.profile_name}")
 
@@ -83,7 +98,8 @@ class Worker:
 
             page = self.browser_automation.launch_browser(
                 self.profile,
-                url=self.config.telegram.url
+                url=self.config.telegram.url,
+                proxy_override=proxy.playwright_url if proxy else None
             )
 
             # Initialize Telegram sender and error handler
@@ -121,6 +137,31 @@ class Worker:
 
                 # Clear current task after processing
                 self.current_task_id = None
+
+                # Record proxy health statistics
+                if self.current_proxy_url:
+                    error_type = None
+                    if not success:
+                        # Determine error type from last task
+                        error_type = getattr(self, '_last_error_type', 'other')
+
+                    self.health_monitor.record_attempt(
+                        proxy_url=self.current_proxy_url,
+                        profile_id=self.profile.profile_id,
+                        status="success" if success else "failed",
+                        error_type=error_type
+                    )
+
+                    # Check if proxy rotation is needed
+                    new_proxy_url = self.health_monitor.check_and_rotate_if_needed(
+                        self.current_proxy_url,
+                        self.profile.profile_id
+                    )
+                    if new_proxy_url:
+                        self.logger.warning(f"Proxy rotated! Restarting browser...")
+                        self.current_proxy_url = new_proxy_url
+                        # Restart browser with new proxy
+                        self._restart_browser_with_new_proxy(new_proxy_url)
 
                 if success is None:
                     # Worker should stop (account frozen)
@@ -178,6 +219,56 @@ class Worker:
 
         return self.exit_code
 
+    def _restart_browser_with_new_proxy(self, new_proxy_url: str):
+        """
+        Перезапустить браузер с новым прокси.
+
+        Args:
+            new_proxy_url: URL нового прокси в формате host:port:user:pass
+        """
+        try:
+            # Закрываем текущий браузер
+            if self.browser_automation:
+                self.browser_automation.close_browser()
+
+            # Конвертируем URL для Playwright
+            parts = new_proxy_url.split(':')
+            if len(parts) == 4:
+                host, port, user, password = parts
+                playwright_proxy = f"http://{user}:{password}@{host}:{port}"
+            else:
+                playwright_proxy = new_proxy_url
+
+            self.logger.info(f"Restarting browser with new proxy: {parts[0]}:{parts[1]}")
+
+            # Запускаем новый браузер
+            if self.use_simplified:
+                self.browser_automation = BrowserAutomationSimplified()
+            else:
+                self.browser_automation = BrowserAutomation()
+
+            page = self.browser_automation.launch_browser(
+                self.profile,
+                url=self.config.telegram.url,
+                proxy_override=playwright_proxy
+            )
+
+            # Переинициализируем компоненты
+            self.telegram = TelegramSender(page)
+            self.error_handler = ErrorHandler(
+                self.profile.profile_id,
+                self.profile.profile_name,
+                page,
+                self.group_id,
+                self.run_id
+            )
+
+            self.logger.info("Browser restarted with new proxy successfully")
+
+        except Exception as e:
+            self.logger.error(f"Failed to restart browser with new proxy: {e}")
+            raise
+
     def _process_task(self, task: dict) -> Optional[bool]:
         """
         Process a single task.
@@ -197,6 +288,7 @@ class Worker:
 
             if not chat_found:
                 # Chat not found - block task
+                self._last_error_type = 'chat_not_found'  # Track for proxy health
                 self.error_handler.handle_chat_not_found(task)
                 self.logger.log_task_complete(chat_username, success=False)
                 return False
@@ -206,6 +298,7 @@ class Worker:
 
             if not chat_opened:
                 # Failed to open chat
+                self._last_error_type = 'other'  # Track for proxy health
                 self.error_handler.handle_unexpected_error(
                     task,
                     Exception("Failed to open chat")
@@ -225,6 +318,7 @@ class Worker:
             # Check if can send
             if not restrictions.get('can_send'):
                 # Cannot send due to restrictions
+                self._last_error_type = 'other'  # Track for proxy health (restrictions)
                 reason = restrictions.get('reason', 'unknown')
                 self.error_handler.handle_send_restriction(task, reason)
                 self.logger.log_task_complete(chat_username, success=False)
@@ -281,6 +375,7 @@ class Worker:
                         )
                 else:
                     # Other send failure (unexpected error)
+                    self._last_error_type = 'other'  # Track for proxy health
                     self.error_handler.handle_unexpected_error(
                         task,
                         Exception("Failed to send message")
@@ -290,6 +385,7 @@ class Worker:
                 return False
 
             # Step 6: Record success
+            self._last_error_type = None  # Clear error type on success
             self.task_queue.mark_task_success(
                 task_id=task['id'],
                 profile_id=self.profile.profile_id,
@@ -309,6 +405,7 @@ class Worker:
 
         except Exception as e:
             # Unexpected error
+            self._last_error_type = 'other'  # Track for proxy health
             self.error_handler.handle_unexpected_error(task, e)
             self.logger.log_task_complete(chat_username, success=False)
             return False

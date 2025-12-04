@@ -13,8 +13,15 @@ set -e
 trap 'rm -rf /tmp/donut_profiles_sync 2>/dev/null' EXIT
 
 # === КОНФИГУРАЦИЯ (можно изменить) ===
-LOCAL_PROFILES_DIR="$HOME/Library/Application Support/DonutBrowserDev/profiles"
+# Локальные пути - используем данные из проекта donutbrowser
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LOCAL_PROFILES_DIR="$PROJECT_ROOT/donutbrowser/data/profiles"
+LOCAL_PROXIES_DIR="$PROJECT_ROOT/donutbrowser/data/proxies"
+
+# Удалённые пути на сервере
 REMOTE_PROFILES_DIR="\$HOME/.local/share/DonutBrowserDev/profiles"
+REMOTE_PROXIES_DIR="\$HOME/.local/share/DonutBrowserDev/proxies"
 # Camoufox устанавливается через pip в ~/.cache/camoufox/
 REMOTE_CAMOUFOX_PATH="\$HOME/.cache/camoufox/camoufox"
 TEMP_DIR="/tmp/donut_profiles_sync"
@@ -109,22 +116,26 @@ test_connection() {
 # Проверка/создание директорий на сервере
 check_remote_dirs() {
     local remote_profiles_expanded="${REMOTE_PROFILES_DIR//\$HOME/$REMOTE_HOME}"
+    local remote_proxies_expanded="${REMOTE_PROXIES_DIR//\$HOME/$REMOTE_HOME}"
 
-    log_info "Проверка директории на сервере: $remote_profiles_expanded"
+    log_info "Проверка директорий на сервере..."
 
+    # Проверяем директорию профилей
     if ! ssh_cmd "test -d $remote_profiles_expanded"; then
-        log_warning "Директория не существует на сервере!"
-        read -p "Создать директорию? (y/n): " create_dir
-
-        if [[ "$create_dir" == "y" || "$create_dir" == "Y" ]]; then
-            ssh_cmd "mkdir -p $remote_profiles_expanded"
-            log_success "Директория создана"
-        else
-            log_error "Отмена операции"
-            exit 1
-        fi
+        log_warning "Директория профилей не существует: $remote_profiles_expanded"
+        ssh_cmd "mkdir -p $remote_profiles_expanded"
+        log_success "Директория профилей создана"
     else
-        log_success "Директория существует"
+        log_success "Директория профилей существует"
+    fi
+
+    # Проверяем директорию прокси
+    if ! ssh_cmd "test -d $remote_proxies_expanded"; then
+        log_warning "Директория прокси не существует: $remote_proxies_expanded"
+        ssh_cmd "mkdir -p $remote_proxies_expanded"
+        log_success "Директория прокси создана"
+    else
+        log_success "Директория прокси существует"
     fi
 }
 
@@ -405,6 +416,66 @@ adapt_paths() {
     log_success "Пути адаптированы: $new_path"
 }
 
+# Копирование всех прокси на сервер
+copy_all_proxies() {
+    local remote_proxies_expanded="${REMOTE_PROXIES_DIR//\$HOME/$REMOTE_HOME}"
+
+    if [[ ! -d "$LOCAL_PROXIES_DIR" ]]; then
+        log_warning "Локальная директория прокси не найдена: $LOCAL_PROXIES_DIR"
+        return 1
+    fi
+
+    local proxy_files=("$LOCAL_PROXIES_DIR"/*.json)
+    local proxy_count=${#proxy_files[@]}
+
+    if [[ $proxy_count -eq 0 ]] || [[ ! -f "${proxy_files[0]}" ]]; then
+        log_warning "Нет прокси для копирования"
+        return 0
+    fi
+
+    log_info "Копирование $proxy_count прокси на сервер..."
+
+    # Создаём архив всех прокси
+    mkdir -p "$TEMP_DIR"
+    local archive_name="proxies.tar.gz"
+    local local_archive="$TEMP_DIR/$archive_name"
+
+    cd "$LOCAL_PROXIES_DIR"
+    COPYFILE_DISABLE=1 tar -czf "$local_archive" *.json
+
+    # Копируем архив на сервер
+    scp_cmd "$local_archive" "/tmp/"
+
+    # Распаковываем на сервере (перезаписываем существующие)
+    ssh_cmd "cd '$remote_proxies_expanded' && tar -xzf /tmp/$archive_name && rm /tmp/$archive_name"
+
+    # Удаляем локальный архив
+    rm -f "$local_archive"
+
+    log_success "Прокси скопированы: $proxy_count файлов"
+}
+
+# Копирование нового proxies.txt для системы автоматизации
+copy_proxies_txt() {
+    local local_proxies_txt="$PROJECT_ROOT/tg-automatizamtion/data/proxies.txt"
+    local remote_proxies_txt="/root/don/tg-automatizamtion/data/proxies.txt"
+
+    if [[ ! -f "$local_proxies_txt" ]]; then
+        log_warning "Файл proxies.txt не найден: $local_proxies_txt"
+        return 1
+    fi
+
+    log_info "Копирование proxies.txt для системы автоматизации..."
+
+    # Создаём директорию на сервере если не существует
+    ssh_cmd "mkdir -p /root/don/tg-automatizamtion/data"
+
+    # Копируем файл
+    scp_cmd "$local_proxies_txt" "$remote_proxies_txt"
+
+    log_success "proxies.txt скопирован на сервер"
+}
+
 # Основная функция
 main() {
     echo ""
@@ -515,15 +586,24 @@ main() {
         echo ""
     done
 
+    # Копируем все прокси (JSON файлы для DonutBrowser)
+    echo ""
+    copy_all_proxies
+
+    # Копируем proxies.txt для системы автоматизации
+    echo ""
+    copy_proxies_txt
+
     # Итоговый отчёт
     echo ""
     echo -e "${CYAN}=== Результат ===${NC}"
     echo ""
-    log_success "Успешно скопировано: $success_count"
+    log_success "Профилей скопировано: $success_count"
     [[ $fail_count -gt 0 ]] && log_error "Ошибок: $fail_count"
     echo ""
 
-    log_info "Путь на сервере: ${REMOTE_PROFILES_DIR//\$HOME/$REMOTE_HOME}"
+    log_info "Путь профилей на сервере: ${REMOTE_PROFILES_DIR//\$HOME/$REMOTE_HOME}"
+    log_info "Путь прокси на сервере: ${REMOTE_PROXIES_DIR//\$HOME/$REMOTE_HOME}"
     echo ""
 }
 

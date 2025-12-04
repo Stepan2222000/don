@@ -3,7 +3,7 @@
 
 # Лимиты и ограничения
 limits:
-  max_messages_per_hour: 1000            # Сообщений в час на профиль
+  max_messages_per_hour: 25              # Сообщений в час на профиль
   max_cycles: 100                        # Количество циклов (проходов по всем чатам)
   delay_randomness: 0.2                # ±20% к рассчитанной задержке
   cycle_delay_minutes: 5              # Задержка между циклами (минуты)
@@ -45,3 +45,11 @@ logging:
 database:
   path: "db/telegram_automation.db"
   wal_mode: true                       # Использовать WAL режим
+
+# Управление прокси
+proxy:
+  pool_file: "data/proxies.txt"        # Файл с прокси (host:port:user:pass)
+  min_attempts_for_check: 10           # Мин. попыток перед анализом
+  chat_not_found_threshold: 40         # % chat_not_found для ротации
+  unblock_tasks_on_rotate: true        # Разблокировать задачи при ротации
+  health_reset_hours: 1                # Через сколько часов дать "второй шанс"

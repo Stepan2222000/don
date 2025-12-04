@@ -87,6 +87,24 @@ class DatabaseConfig:
 
 
 @dataclass
+class ProxyConfig:
+    """Proxy management configuration."""
+    pool_file: str = "data/proxies.txt"
+    min_attempts_for_check: int = 10          # Мин. попыток перед анализом
+    chat_not_found_threshold: int = 40        # % для ротации
+    unblock_tasks_on_rotate: bool = True      # Разблокировать задачи при ротации
+    health_reset_hours: int = 1               # Через сколько часов дать "второй шанс"
+
+    @property
+    def absolute_pool_path(self) -> str:
+        """Get absolute path to proxy pool file."""
+        pool_path = Path(self.pool_file)
+        if pool_path.is_absolute():
+            return str(pool_path)
+        return str(PROJECT_ROOT / pool_path)
+
+
+@dataclass
 class Config:
     """Main configuration class."""
     limits: LimitsConfig = field(default_factory=LimitsConfig)
@@ -96,6 +114,7 @@ class Config:
     screenshots: ScreenshotsConfig = field(default_factory=ScreenshotsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    proxy: ProxyConfig = field(default_factory=ProxyConfig)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Config':
@@ -107,7 +126,8 @@ class Config:
             retry=RetryConfig(**data.get('retry', {})),
             screenshots=ScreenshotsConfig(**data.get('screenshots', {})),
             logging=LoggingConfig(**data.get('logging', {})),
-            database=DatabaseConfig(**data.get('database', {}))
+            database=DatabaseConfig(**data.get('database', {})),
+            proxy=ProxyConfig(**data.get('proxy', {}))
         )
 
     @classmethod
@@ -195,7 +215,8 @@ class Config:
             'retry': self.retry.__dict__,
             'screenshots': self.screenshots.__dict__,
             'logging': self.logging.__dict__,
-            'database': self.database.__dict__
+            'database': self.database.__dict__,
+            'proxy': self.proxy.__dict__
         }
 
     def save_to_file(self, config_path: str = None):

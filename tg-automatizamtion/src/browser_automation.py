@@ -9,6 +9,7 @@ import subprocess
 import json
 import time
 import platform
+import os
 from pathlib import Path
 from typing import Optional
 from playwright.sync_api import sync_playwright, Browser, Page, PlaywrightContextManager
@@ -283,7 +284,12 @@ class BrowserAutomation:
             "\n\nPlease specify nodecar_path manually."
         )
 
-    def launch_browser(self, profile: DonutProfile, url: str = "https://web.telegram.org/k") -> Page:
+    def launch_browser(
+        self,
+        profile: DonutProfile,
+        url: str = "https://web.telegram.org/k",
+        proxy_override: Optional[str] = None
+    ) -> Page:
         """
         Launch browser with profile using nodecar CLI.
 
@@ -292,6 +298,8 @@ class BrowserAutomation:
         Args:
             profile: DonutProfile to launch
             url: URL to open (default: Telegram Web)
+            proxy_override: Optional proxy URL to use instead of profile's proxy
+                           Format: "http://user:pass@host:port"
 
         Returns:
             Playwright Page object
@@ -313,9 +321,13 @@ class BrowserAutomation:
             # Connect to browser with Playwright
             self.playwright = sync_playwright().start()
 
-            # Prepare proxy config
+            # Prepare proxy config - proxy_override takes precedence
             # Playwright requires separate username/password, not embedded in URL
-            proxy_config = _parse_proxy_url(profile.proxy) if profile.proxy else None
+            proxy_url = proxy_override if proxy_override else profile.proxy
+            proxy_config = _parse_proxy_url(proxy_url) if proxy_url else None
+
+            if proxy_override:
+                logger.info(f"Using proxy override: {proxy_override.split('@')[-1] if '@' in proxy_override else proxy_override}")
 
             # Launch persistent context with fingerprint
             config = get_config()
@@ -355,8 +367,15 @@ class BrowserAutomation:
         Camoufox expects fingerprint configuration in CAMOU_CONFIG_* env vars.
         Large configs are split into chunks.
         """
+        # Start with system environment (includes DISPLAY for Xvfb)
+        env_vars = os.environ.copy()
+
+        # Ensure DISPLAY is set for headless servers
+        if 'DISPLAY' not in env_vars:
+            env_vars['DISPLAY'] = ':99'
+
         if not fingerprint:
-            return {}
+            return env_vars
 
         # Convert fingerprint to JSON string
         fingerprint_json = json.dumps(fingerprint)
@@ -367,8 +386,7 @@ class BrowserAutomation:
         for i in range(0, len(fingerprint_json), chunk_size):
             chunks.append(fingerprint_json[i:i + chunk_size])
 
-        # Create env vars
-        env_vars = {}
+        # Add Camoufox env vars
         for i, chunk in enumerate(chunks, start=1):
             env_vars[f"CAMOU_CONFIG_{i}"] = chunk
 
@@ -423,13 +441,20 @@ class BrowserAutomationSimplified:
         self.context = None
         self.page: Optional[Page] = None
 
-    def launch_browser(self, profile: DonutProfile, url: str = "https://web.telegram.org/k") -> Page:
+    def launch_browser(
+        self,
+        profile: DonutProfile,
+        url: str = "https://web.telegram.org/k",
+        proxy_override: Optional[str] = None
+    ) -> Page:
         """
         Launch browser with Playwright directly.
 
         Args:
             profile: DonutProfile to launch
             url: URL to open
+            proxy_override: Optional proxy URL to use instead of profile's proxy
+                           Format: "http://user:pass@host:port"
 
         Returns:
             Playwright Page object
@@ -449,7 +474,12 @@ class BrowserAutomationSimplified:
 
         # Launch persistent context with fingerprint
         # Playwright requires separate username/password, not embedded in URL
-        proxy_config = _parse_proxy_url(profile.proxy) if profile.proxy else None
+        # proxy_override takes precedence over profile.proxy
+        proxy_url = proxy_override if proxy_override else profile.proxy
+        proxy_config = _parse_proxy_url(proxy_url) if proxy_url else None
+
+        if proxy_override:
+            logger.info(f"Using proxy override: {proxy_override.split('@')[-1] if '@' in proxy_override else proxy_override}")
         config = get_config()
 
         self.context = self.playwright.firefox.launch_persistent_context(
@@ -481,8 +511,15 @@ class BrowserAutomationSimplified:
         Camoufox expects fingerprint configuration in CAMOU_CONFIG_* env vars.
         Large configs are split into chunks.
         """
+        # Start with system environment (includes DISPLAY for Xvfb)
+        env_vars = os.environ.copy()
+
+        # Ensure DISPLAY is set for headless servers
+        if 'DISPLAY' not in env_vars:
+            env_vars['DISPLAY'] = ':99'
+
         if not fingerprint:
-            return {}
+            return env_vars
 
         # Convert fingerprint to JSON string
         fingerprint_json = json.dumps(fingerprint)
@@ -493,8 +530,7 @@ class BrowserAutomationSimplified:
         for i in range(0, len(fingerprint_json), chunk_size):
             chunks.append(fingerprint_json[i:i + chunk_size])
 
-        # Create env vars
-        env_vars = {}
+        # Add Camoufox env vars
         for i, chunk in enumerate(chunks, start=1):
             env_vars[f"CAMOU_CONFIG_{i}"] = chunk
 

@@ -1,0 +1,12 @@
+# Прокси для автоматизации Telegram
+# Формат: host:port:user:pass
+# Пустые строки и комментарии (#) игнорируются
+# Сгенерировано: 2025-12-04 11:03:53
+
+78.153.154.169:11223:qCYvMPJNAT:xLsClvghfG
+185.184.77.8:11223:llrU4JePP8:YvYWLSybpv
+78.153.154.170:11223:dgyfhGojav:SWfQyBfbUT
+78.153.154.138:11223:nqX8TWwDqn:gwB3gpULVc
+78.153.154.165:11223:E7KgRB1Jed:Rebyk3ua7u
+109.248.202.6:11223:CHMWutYrsq:baeXLD5KVG
+83.217.4.177:11223:FZwQSNBgMa:CBm1DJk6CQ
