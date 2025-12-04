@@ -47,6 +47,62 @@ def get_default_proxies_dir() -> str:
     return str(PROJECT_ROOT.parent / "donutbrowser" / "data" / "proxies")
 
 
+def find_camoufox_executable() -> Optional[str]:
+    """
+    Find camoufox executable on the current system.
+
+    Searches in common locations:
+    - ~/.cache/camoufox/ (pip install location on Linux)
+    - ~/.local/share/camoufox/ (alternative Linux location)
+    - ~/Library/Application Support/DonutBrowserDev/binaries/camoufox/ (macOS)
+
+    Returns:
+        Path to camoufox executable or None if not found
+    """
+    import platform
+    import glob
+
+    system = platform.system()
+    home = os.path.expanduser("~")
+
+    if system == "Linux":
+        # Check pip cache location first - both direct and versioned paths
+        paths_to_check = [
+            f"{home}/.cache/camoufox/camoufox",  # Direct install
+            "/usr/local/bin/camoufox",
+        ]
+        # Check direct paths first
+        for path in paths_to_check:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+
+        # Then check versioned patterns
+        patterns = [
+            f"{home}/.cache/camoufox/*/camoufox",
+            f"{home}/.local/share/camoufox/*/camoufox",
+        ]
+        for pattern in patterns:
+            matches = glob.glob(pattern)
+            if matches:
+                # Return the most recent version
+                matches.sort(reverse=True)
+                if os.path.isfile(matches[0]) and os.access(matches[0], os.X_OK):
+                    return matches[0]
+
+    elif system == "Darwin":  # macOS
+        patterns = [
+            f"{home}/Library/Application Support/DonutBrowserDev/binaries/camoufox/*/Camoufox.app/Contents/MacOS/camoufox",
+        ]
+        for pattern in patterns:
+            matches = glob.glob(pattern)
+            if matches:
+                matches.sort(reverse=True)
+                if os.path.isfile(matches[0]) and os.access(matches[0], os.X_OK):
+                    return matches[0]
+
+    return None
+
+
 @dataclass
 class DonutProfile:
     """Donut Browser profile information."""
@@ -300,15 +356,17 @@ class ProfileManager:
         if not profile.browser_data_path.exists():
             raise ValueError(f"Profile data directory not found: {profile.browser_data_path}")
 
-        # Check executable path
-        if not profile.executable_path:
-            raise ValueError(f"Executable path not set for profile: {profile.profile_name}")
-
-        if not Path(profile.executable_path).exists():
-            raise ValueError(
-                f"Camoufox executable not found: {profile.executable_path}\n"
-                f"Please check profile configuration or download Camoufox browser."
-            )
+        # Check executable path - try to find camoufox if path doesn't exist
+        if not profile.executable_path or not Path(profile.executable_path).exists():
+            # Try to find camoufox on current system
+            found_path = find_camoufox_executable()
+            if found_path:
+                profile.executable_path = found_path
+            else:
+                raise ValueError(
+                    f"Camoufox executable not found: {profile.executable_path}\n"
+                    f"Please install camoufox: pip install camoufox && python -m camoufox fetch"
+                )
 
         # Check fingerprint
         if not profile.fingerprint:
