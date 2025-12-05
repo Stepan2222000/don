@@ -6,4 +6,11 @@ playwright>=1.40.0
 # Configuration
 pyyaml>=6.0
 
-# Note: SQLite is built into Python, no installation needed
+# Database - PostgreSQL
+psycopg2-binary>=2.9.9
+
+# Process monitoring (for profile watcher)
+psutil>=5.9.0
+
+# File system watcher (for profile auto-sync)
+watchdog>=3.0.0

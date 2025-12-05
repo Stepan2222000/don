@@ -71,8 +71,23 @@ class LoggingConfig:
 
 
 @dataclass
-class DatabaseConfig:
-    """Database configuration."""
+class PostgreSQLConfig:
+    """PostgreSQL configuration."""
+    host: str = "localhost"
+    port: int = 5432
+    database: str = "telegram_automation"
+    user: str = "postgres"
+    password: str = ""
+
+    @property
+    def connection_string(self) -> str:
+        """Get PostgreSQL connection string."""
+        return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}"
+
+
+@dataclass
+class SQLiteConfig:
+    """SQLite configuration."""
     path: str = "db/telegram_automation.db"
     wal_mode: bool = True
 
@@ -82,8 +97,31 @@ class DatabaseConfig:
         db_path = Path(self.path)
         if db_path.is_absolute():
             return str(db_path)
-        # Resolve relative path from PROJECT_ROOT
         return str(PROJECT_ROOT / db_path)
+
+
+@dataclass
+class DatabaseConfig:
+    """Database configuration with PostgreSQL and SQLite support."""
+    type: str = "postgresql"  # "postgresql" или "sqlite"
+    postgresql: PostgreSQLConfig = field(default_factory=PostgreSQLConfig)
+    sqlite: SQLiteConfig = field(default_factory=SQLiteConfig)
+
+    @property
+    def is_postgresql(self) -> bool:
+        """Check if using PostgreSQL."""
+        return self.type.lower() == "postgresql"
+
+    @property
+    def is_sqlite(self) -> bool:
+        """Check if using SQLite."""
+        return self.type.lower() == "sqlite"
+
+    # Для обратной совместимости
+    @property
+    def absolute_path(self) -> str:
+        """Get absolute path to SQLite database file."""
+        return self.sqlite.absolute_path
 
 
 @dataclass
@@ -119,6 +157,14 @@ class Config:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Config':
         """Create Config from dictionary."""
+        # Parse database config with nested structures
+        db_data = data.get('database', {})
+        db_config = DatabaseConfig(
+            type=db_data.get('type', 'postgresql'),
+            postgresql=PostgreSQLConfig(**db_data.get('postgresql', {})),
+            sqlite=SQLiteConfig(**db_data.get('sqlite', {}))
+        )
+
         return cls(
             limits=LimitsConfig(**data.get('limits', {})),
             timeouts=TimeoutsConfig(**data.get('timeouts', {})),
@@ -126,7 +172,7 @@ class Config:
             retry=RetryConfig(**data.get('retry', {})),
             screenshots=ScreenshotsConfig(**data.get('screenshots', {})),
             logging=LoggingConfig(**data.get('logging', {})),
-            database=DatabaseConfig(**data.get('database', {})),
+            database=db_config,
             proxy=ProxyConfig(**data.get('proxy', {}))
         )
 

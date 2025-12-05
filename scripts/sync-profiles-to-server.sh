@@ -3,11 +3,51 @@
 # ============================================================================
 # Скрипт переноса профилей Donut Browser на удалённый сервер
 # ============================================================================
-# Использование: ./sync-profiles-to-server.sh
+# Использование:
+#   ./sync-profiles-to-server.sh                    # Интерактивный режим
+#   ./sync-profiles-to-server.sh --auto             # Автоматический режим (все новые)
+#   ./sync-profiles-to-server.sh --auto --profiles "uuid1,uuid2"  # Конкретные профили
+#
+# Для автоматического режима нужен конфиг ~/.donut-sync.conf:
+#   SERVER_IP=81.30.105.134
+#   SERVER_USER=root
+#   SERVER_PASS=yourpassword
+#
 # Зависимости: sshpass (brew install hudochenkov/sshpass/sshpass)
 # ============================================================================
 
 set -e
+
+# Режимы работы
+AUTO_MODE="${AUTO_MODE:-0}"
+PROFILES_TO_SYNC="${PROFILES:-}"
+CONFIG_FILE="$HOME/.donut-sync.conf"
+
+# Парсинг аргументов
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --auto|-a)
+            AUTO_MODE="1"
+            shift
+            ;;
+        --profiles|-p)
+            PROFILES_TO_SYNC="$2"
+            shift 2
+            ;;
+        --config|-c)
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+# Загрузка конфига для автоматического режима
+if [[ "$AUTO_MODE" == "1" && -f "$CONFIG_FILE" ]]; then
+    source "$CONFIG_FILE"
+fi
 
 # Очистка при выходе
 trap 'rm -rf /tmp/donut_profiles_sync 2>/dev/null' EXIT
@@ -89,6 +129,17 @@ cleanup() {
 
 # Запрос данных сервера
 prompt_server_credentials() {
+    # В автоматическом режиме используем переменные из конфига/окружения
+    if [[ "$AUTO_MODE" == "1" ]]; then
+        if [[ -z "$SERVER_IP" || -z "$SERVER_USER" || -z "$SERVER_PASS" ]]; then
+            log_error "Автоматический режим требует SERVER_IP, SERVER_USER, SERVER_PASS"
+            log_error "Создайте файл $CONFIG_FILE с этими переменными"
+            exit 1
+        fi
+        log_info "Автоматический режим: $SERVER_USER@$SERVER_IP"
+        return
+    fi
+
     echo -e "${CYAN}=== Подключение к серверу ===${NC}"
     echo ""
 
@@ -478,11 +529,13 @@ copy_proxies_txt() {
 
 # Основная функция
 main() {
-    echo ""
-    echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     Donut Browser - Синхронизация профилей на сервер       ║${NC}"
-    echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    if [[ "$AUTO_MODE" != "1" ]]; then
+        echo ""
+        echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║     Donut Browser - Синхронизация профилей на сервер       ║${NC}"
+        echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+    fi
 
     # Проверка зависимостей
     check_dependencies
@@ -508,52 +561,71 @@ main() {
     log_info "Локальных профилей: $local_count"
     log_info "Профилей на сервере: $remote_count"
 
-    # Показываем меню
-    local mode=$(show_menu)
-
     local profiles_to_copy=()
 
-    case $mode in
-        1)
-            # Все профили с заменой
-            log_info "Режим: Все профили (полная замена)"
-            for profile in $local_profiles; do
-                profiles_to_copy+=("${profile%%|*}")
-            done
-            ;;
-        2)
-            # Только новые
-            log_info "Режим: Только новые профили"
-            for profile in $local_profiles; do
-                local uuid="${profile%%|*}"
-                if ! echo "$remote_profiles" | grep -q "^${uuid}$"; then
-                    profiles_to_copy+=("$uuid")
-                fi
-            done
-            ;;
-        3)
-            # Выбор с заменой
-            log_info "Режим: Выбор профилей (с заменой)"
-            while IFS= read -r uuid; do
-                [[ -n "$uuid" ]] && profiles_to_copy+=("$uuid")
-            done < <(select_profiles "$local_profiles" "no" "$remote_profiles")
-            ;;
-        4)
-            # Выбор только новых
-            log_info "Режим: Выбор профилей (только новые)"
-            while IFS= read -r uuid; do
-                [[ -n "$uuid" ]] && profiles_to_copy+=("$uuid")
-            done < <(select_profiles "$local_profiles" "yes" "$remote_profiles")
-            ;;
-        0)
-            log_info "Выход"
-            exit 0
-            ;;
-        *)
-            log_error "Неверный выбор"
-            exit 1
-            ;;
-    esac
+    # Автоматический режим с конкретными профилями
+    if [[ "$AUTO_MODE" == "1" && -n "$PROFILES_TO_SYNC" ]]; then
+        log_info "Автоматический режим: синхронизация указанных профилей"
+        IFS=',' read -ra profiles_to_copy <<< "$PROFILES_TO_SYNC"
+        log_info "Профилей для синхронизации: ${#profiles_to_copy[@]}"
+
+    # Автоматический режим без указания профилей - только новые
+    elif [[ "$AUTO_MODE" == "1" ]]; then
+        log_info "Автоматический режим: только новые профили"
+        for profile in $local_profiles; do
+            local uuid="${profile%%|*}"
+            if ! echo "$remote_profiles" | grep -q "^${uuid}$"; then
+                profiles_to_copy+=("$uuid")
+            fi
+        done
+
+    # Интерактивный режим
+    else
+        # Показываем меню
+        local mode=$(show_menu)
+
+        case $mode in
+            1)
+                # Все профили с заменой
+                log_info "Режим: Все профили (полная замена)"
+                for profile in $local_profiles; do
+                    profiles_to_copy+=("${profile%%|*}")
+                done
+                ;;
+            2)
+                # Только новые
+                log_info "Режим: Только новые профили"
+                for profile in $local_profiles; do
+                    local uuid="${profile%%|*}"
+                    if ! echo "$remote_profiles" | grep -q "^${uuid}$"; then
+                        profiles_to_copy+=("$uuid")
+                    fi
+                done
+                ;;
+            3)
+                # Выбор с заменой
+                log_info "Режим: Выбор профилей (с заменой)"
+                while IFS= read -r uuid; do
+                    [[ -n "$uuid" ]] && profiles_to_copy+=("$uuid")
+                done < <(select_profiles "$local_profiles" "no" "$remote_profiles")
+                ;;
+            4)
+                # Выбор только новых
+                log_info "Режим: Выбор профилей (только новые)"
+                while IFS= read -r uuid; do
+                    [[ -n "$uuid" ]] && profiles_to_copy+=("$uuid")
+                done < <(select_profiles "$local_profiles" "yes" "$remote_profiles")
+                ;;
+            0)
+                log_info "Выход"
+                exit 0
+                ;;
+            *)
+                log_error "Неверный выбор"
+                exit 1
+                ;;
+        esac
+    fi
 
     # Проверяем что есть что копировать
     if [[ ${#profiles_to_copy[@]} -eq 0 ]]; then
@@ -563,8 +635,14 @@ main() {
 
     echo ""
     log_info "Профилей для копирования: ${#profiles_to_copy[@]}"
-    echo ""
-    read -p "Начать копирование? (y/n): " confirm
+
+    # Подтверждение только в интерактивном режиме
+    if [[ "$AUTO_MODE" != "1" ]]; then
+        echo ""
+        read -p "Начать копирование? (y/n): " confirm
+    else
+        confirm="y"
+    fi
 
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
         log_info "Отменено"

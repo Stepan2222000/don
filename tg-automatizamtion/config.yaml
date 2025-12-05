@@ -43,8 +43,18 @@ logging:
 
 # База данных
 database:
-  path: "db/telegram_automation.db"
-  wal_mode: true                       # Использовать WAL режим
+  type: "postgresql"                   # postgresql или sqlite
+  # PostgreSQL настройки
+  postgresql:
+    host: "81.30.105.134"
+    port: 5432
+    database: "telegram_ras"
+    user: "admin"
+    password: "Password123"
+  # SQLite настройки (для локальной разработки, если нужно)
+  sqlite:
+    path: "db/telegram_automation.db"
+    wal_mode: true
 
 # Управление прокси
 proxy:
