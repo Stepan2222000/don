@@ -58,6 +58,8 @@ database:
 
 # Управление прокси
 proxy:
+  enabled: true                        # Глобальный переключатель прокси (true/false)
+  disabled_profiles: []                # Список UUID профилей без прокси
   pool_file: "data/proxies.txt"        # Файл с прокси (host:port:user:pass)
   min_attempts_for_check: 10           # Мин. попыток перед анализом
   chat_not_found_threshold: 40         # % chat_not_found для ротации

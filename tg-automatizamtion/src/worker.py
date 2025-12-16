@@ -1,34 +1,36 @@
 """
-Worker module for Telegram Automation System
+Worker module for Telegram Automation System (async version)
 
-Main worker loop that processes tasks from queue.
-Each worker runs in a separate process with its own browser instance.
+Main async worker loop that processes tasks from queue.
+Each worker runs with its own browser instance.
 """
 
-import time
+import asyncio
 import argparse
 import sys
 from typing import Optional
 
-from .config import load_config, get_config, DEFAULT_CONFIG_PATH
-from .database import init_database, get_database
+from .config import load_config, get_config
+from .database import init_database, get_database, close_database, AsyncDatabase
 from .logger import init_logger, get_logger
 from .profile_manager import get_profile_manager, init_profile_manager, DonutProfile
-from .browser_automation import BrowserAutomation, BrowserAutomationSimplified, QRCodePageDetectedError
+from .browser_automation import BrowserAutomationSimplified, QRCodePageDetectedError
 from .telegram_sender import TelegramSender
-from .task_queue import get_task_queue
-from .error_handler import ErrorHandler
-from .proxy_manager import get_proxy_manager
-from .proxy_health import get_health_monitor
+from .task_queue import init_task_queue, AsyncTaskQueue
+from .error_handler import AsyncErrorHandler
+from .proxy_manager import init_proxy_manager, AsyncProxyManager
 
 
-class Worker:
-    """Worker process for automated message sending."""
+class AsyncWorker:
+    """Async worker process for automated message sending."""
 
     def __init__(
         self,
         profile: DonutProfile,
         group_id: str,
+        db: AsyncDatabase,
+        task_queue: AsyncTaskQueue,
+        proxy_manager: AsyncProxyManager,
         use_simplified: bool = True,
         run_id: Optional[str] = None
     ):
@@ -38,6 +40,9 @@ class Worker:
         Args:
             profile: DonutProfile to use for automation
             group_id: Campaign group ID to process tasks for
+            db: AsyncDatabase instance
+            task_queue: AsyncTaskQueue instance
+            proxy_manager: AsyncProxyManager instance
             use_simplified: Use simplified browser automation (faster)
             run_id: Optional session ID for per-session cycle tracking
         """
@@ -47,17 +52,16 @@ class Worker:
         self.run_id = run_id
         self.config = get_config()
         self.logger = get_logger()
-        self.db = get_database()
-        self.task_queue = get_task_queue()
+        self.db = db
+        self.task_queue = task_queue
+        self.proxy_manager = proxy_manager
 
         # Browser components (initialized in run())
         self.browser_automation = None
         self.telegram = None
         self.error_handler = None
 
-        # Proxy management
-        self.proxy_manager = get_proxy_manager()
-        self.health_monitor = get_health_monitor()
+        # Proxy tracking
         self.current_proxy_url = None
 
         # Track current task for cleanup on interruption
@@ -67,9 +71,9 @@ class Worker:
         self.exit_code = 0  # 0 = success, 1 = error
         self.exit_reason = "completed"  # Reason for exit
 
-    def run(self):
+    async def run(self):
         """
-        Main worker loop.
+        Main async worker loop.
 
         Process:
         1. Launch browser
@@ -80,46 +84,57 @@ class Worker:
         self.logger.log_worker_start(self.profile.profile_name, self.profile.profile_id)
 
         try:
-            # Get proxy for profile
-            proxy = self.proxy_manager.get_or_assign_proxy(self.profile.profile_id)
-            if proxy:
-                self.current_proxy_url = proxy.url
-                self.logger.info(f"Using proxy: {proxy.host}:{proxy.port}")
+            # Check if proxy should be disabled globally or for this profile
+            proxy_disabled = (
+                not self.config.proxy.enabled or
+                self.profile.profile_id.lower() in [p.lower() for p in self.config.proxy.disabled_profiles]
+            )
+
+            # Get proxy for profile (only if not disabled)
+            proxy = None
+            if not proxy_disabled:
+                proxy = await self.proxy_manager.get_or_assign_proxy(self.profile.profile_id)
+                if proxy:
+                    self.current_proxy_url = proxy.url
+                    self.logger.info(f"Using proxy: {proxy.host}:{proxy.port}")
+                else:
+                    self.logger.warning("No proxy assigned to profile")
             else:
-                self.logger.warning("No proxy assigned to profile")
+                if not self.config.proxy.enabled:
+                    self.logger.info("Proxy disabled in config - running without proxy")
+                else:
+                    self.logger.info(f"Proxy disabled for profile: {self.profile.profile_id}")
 
             # Launch browser
             self.logger.info(f"Launching browser for profile: {self.profile.profile_name}")
 
-            if self.use_simplified:
-                self.browser_automation = BrowserAutomationSimplified()
-            else:
-                self.browser_automation = BrowserAutomation()
+            self.browser_automation = BrowserAutomationSimplified()
 
             page = self.browser_automation.launch_browser(
                 self.profile,
                 url=self.config.telegram.url,
-                proxy_override=proxy.playwright_url if proxy else None
+                proxy_override=proxy.playwright_url if proxy else None,
+                disable_proxy=proxy_disabled
             )
 
             # Initialize Telegram sender and error handler
             self.telegram = TelegramSender(page)
-            self.error_handler = ErrorHandler(
+            self.error_handler = AsyncErrorHandler(
                 self.profile.profile_id,
                 self.profile.profile_name,
                 page,
                 self.group_id,
+                self.db,
+                self.task_queue,
                 self.run_id
             )
 
-            # Browser automation now handles page loading and white page detection
-            # No additional checks needed here
             self.logger.info(f"Worker ready: {self.profile.profile_name}")
 
             # Main processing loop
             while True:
                 # Get next task from queue
-                task = self.task_queue.get_next_incomplete_task(
+                task = await self.task_queue.get_next_incomplete_task(
                     self.group_id,
                     self.profile.profile_id,
                     self.run_id
@@ -133,35 +148,10 @@ class Worker:
                 self.current_task_id = task['id']
 
                 # Process task
-                success = self._process_task(task)
+                success = await self._process_task(task)
 
                 # Clear current task after processing
                 self.current_task_id = None
-
-                # Record proxy health statistics
-                if self.current_proxy_url:
-                    error_type = None
-                    if not success:
-                        # Determine error type from last task
-                        error_type = getattr(self, '_last_error_type', 'other')
-
-                    self.health_monitor.record_attempt(
-                        proxy_url=self.current_proxy_url,
-                        profile_id=self.profile.profile_id,
-                        status="success" if success else "failed",
-                        error_type=error_type
-                    )
-
-                    # Check if proxy rotation is needed
-                    new_proxy_url = self.health_monitor.check_and_rotate_if_needed(
-                        self.current_proxy_url,
-                        self.profile.profile_id
-                    )
-                    if new_proxy_url:
-                        self.logger.warning(f"Proxy rotated! Restarting browser...")
-                        self.current_proxy_url = new_proxy_url
-                        # Restart browser with new proxy
-                        self._restart_browser_with_new_proxy(new_proxy_url)
 
                 if success is None:
                     # Worker should stop (account frozen)
@@ -171,16 +161,16 @@ class Worker:
                 if success:
                     delay = self.task_queue.calculate_delay()
                     self.logger.info(f"Waiting {delay:.1f} seconds before next message...")
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                 else:
                     # Small delay even on failure
-                    time.sleep(2)
+                    await asyncio.sleep(2)
 
         except QRCodePageDetectedError as e:
             # Session expired - QR code page detected
             self.logger.error(f"Session expired for {self.profile.profile_name}: {e}")
             # Mark profile as logged out in database
-            self.db.mark_profile_logged_out(self.profile.profile_id)
+            await self.db.mark_profile_logged_out(self.profile.profile_id)
             self.exit_code = 4  # Session expired exit code (don't restart)
             self.exit_reason = "session_expired"
         except KeyboardInterrupt:
@@ -196,7 +186,7 @@ class Worker:
             if self.current_task_id is not None:
                 self.logger.info(f"Resetting interrupted task: {self.current_task_id}")
                 try:
-                    self.db.reset_task_status(self.current_task_id)
+                    await self.db.reset_task_status(self.current_task_id)
                 except Exception as e:
                     self.logger.error(f"Failed to reset task status: {e}")
 
@@ -204,12 +194,6 @@ class Worker:
             if self.browser_automation:
                 self.logger.info(f"Closing browser for profile: {self.profile.profile_name}")
                 self.browser_automation.close_browser()
-
-            # Cleanup database connection
-            try:
-                self.db.close()
-            except Exception as e:
-                self.logger.error(f"Failed to close database connection: {e}")
 
             self.logger.log_worker_stop(
                 self.profile.profile_name,
@@ -219,57 +203,7 @@ class Worker:
 
         return self.exit_code
 
-    def _restart_browser_with_new_proxy(self, new_proxy_url: str):
-        """
-        Перезапустить браузер с новым прокси.
-
-        Args:
-            new_proxy_url: URL нового прокси в формате host:port:user:pass
-        """
-        try:
-            # Закрываем текущий браузер
-            if self.browser_automation:
-                self.browser_automation.close_browser()
-
-            # Конвертируем URL для Playwright
-            parts = new_proxy_url.split(':')
-            if len(parts) == 4:
-                host, port, user, password = parts
-                playwright_proxy = f"http://{user}:{password}@{host}:{port}"
-            else:
-                playwright_proxy = new_proxy_url
-
-            self.logger.info(f"Restarting browser with new proxy: {parts[0]}:{parts[1]}")
-
-            # Запускаем новый браузер
-            if self.use_simplified:
-                self.browser_automation = BrowserAutomationSimplified()
-            else:
-                self.browser_automation = BrowserAutomation()
-
-            page = self.browser_automation.launch_browser(
-                self.profile,
-                url=self.config.telegram.url,
-                proxy_override=playwright_proxy
-            )
-
-            # Переинициализируем компоненты
-            self.telegram = TelegramSender(page)
-            self.error_handler = ErrorHandler(
-                self.profile.profile_id,
-                self.profile.profile_name,
-                page,
-                self.group_id,
-                self.run_id
-            )
-
-            self.logger.info("Browser restarted with new proxy successfully")
-
-        except Exception as e:
-            self.logger.error(f"Failed to restart browser with new proxy: {e}")
-            raise
-
-    def _process_task(self, task: dict) -> Optional[bool]:
+    async def _process_task(self, task: dict) -> Optional[bool]:
         """
         Process a single task.
 
@@ -288,8 +222,7 @@ class Worker:
 
             if not chat_found:
                 # Chat not found - block task
-                self._last_error_type = 'chat_not_found'  # Track for proxy health
-                self.error_handler.handle_chat_not_found(task)
+                await self.error_handler.handle_chat_not_found(task)
                 self.logger.log_task_complete(chat_username, success=False)
                 return False
 
@@ -298,8 +231,7 @@ class Worker:
 
             if not chat_opened:
                 # Failed to open chat
-                self._last_error_type = 'other'  # Track for proxy health
-                self.error_handler.handle_unexpected_error(
+                await self.error_handler.handle_unexpected_error(
                     task,
                     Exception("Failed to open chat")
                 )
@@ -309,23 +241,16 @@ class Worker:
             # Step 3: Check chat restrictions
             restrictions = self.telegram.check_chat_restrictions()
 
-            # Check for account frozen - TEMPORARILY DISABLED
-            # if restrictions.get('account_frozen'):
-            #     # Critical: Account is frozen - stop worker
-            #     self.error_handler.handle_account_frozen(task)
-            #     return None  # Signal to stop worker
-
             # Check if can send
             if not restrictions.get('can_send'):
                 # Cannot send due to restrictions
-                self._last_error_type = 'other'  # Track for proxy health (restrictions)
                 reason = restrictions.get('reason', 'unknown')
-                self.error_handler.handle_send_restriction(task, reason)
+                await self.error_handler.handle_send_restriction(task, reason)
                 self.logger.log_task_complete(chat_username, success=False)
                 return False
 
             # Step 4: Get random message
-            message = self.task_queue.get_random_message(self.group_id)
+            message = await self.task_queue.get_random_message(self.group_id)
 
             # Step 5: Send message
             sent = self.telegram.send_message(message)
@@ -337,26 +262,18 @@ class Worker:
                 if error_type == 'slow_mode_active':
                     # Slow Mode restriction detected
                     wait_duration = self.telegram.last_wait_duration
-                    
+
                     if wait_duration:
                         # Reschedule task
                         buffer_seconds = 30
                         total_wait = wait_duration + buffer_seconds
-                        self.logger.warning(f"Slow Mode active. Rescheduling task for {total_wait}s (wait: {wait_duration}s)")
-                        
-                        # Take debug screenshot of the Slow Mode notification
-                        try:
-                            screenshot_path = self.telegram.save_screenshot('warning', f'slow_mode_detected_{chat_username}')
-                            if screenshot_path:
-                                self.logger.info(f"Slow Mode screenshot saved: {screenshot_path}")
-                        except Exception as e:
-                            self.logger.error(f"Failed to save Slow Mode screenshot: {e}")
+                        self.logger.warning(f"Slow Mode active. Rescheduling task for {total_wait}s")
 
                         # Set next available time (reschedule)
-                        self.task_queue.db.set_task_next_available(task['id'], total_wait)
-                        
-                        # Log event without marking as failed attempt in stats (to avoid block)
-                        self.task_queue.db.log_send(
+                        await self.db.set_task_next_available(task['id'], total_wait)
+
+                        # Log event
+                        await self.db.log_send(
                             group_id=self.group_id,
                             task_id=task['id'],
                             profile_id=self.profile.profile_id,
@@ -368,15 +285,14 @@ class Worker:
                         )
                     else:
                         # Fallback if no time parsed
-                        self.error_handler.handle_send_restriction(
+                        await self.error_handler.handle_send_restriction(
                             task,
                             restriction_reason='slow_mode_active',
                             error_details="Slow Mode active - time-based cooldown"
                         )
                 else:
                     # Other send failure (unexpected error)
-                    self._last_error_type = 'other'  # Track for proxy health
-                    self.error_handler.handle_unexpected_error(
+                    await self.error_handler.handle_unexpected_error(
                         task,
                         Exception("Failed to send message")
                     )
@@ -385,8 +301,7 @@ class Worker:
                 return False
 
             # Step 6: Record success
-            self._last_error_type = None  # Clear error type on success
-            self.task_queue.mark_task_success(
+            await self.task_queue.mark_task_success(
                 task_id=task['id'],
                 profile_id=self.profile.profile_id,
                 message_text=message,
@@ -405,10 +320,75 @@ class Worker:
 
         except Exception as e:
             # Unexpected error
-            self._last_error_type = 'other'  # Track for proxy health
-            self.error_handler.handle_unexpected_error(task, e)
+            await self.error_handler.handle_unexpected_error(task, e)
             self.logger.log_task_complete(chat_username, success=False)
             return False
+
+
+async def async_main(args):
+    """Async worker main function."""
+    db = None
+    try:
+        # Load configuration
+        config = load_config(args.config)
+
+        # Initialize database
+        db = await init_database(config.database)
+
+        # Initialize logger
+        init_logger(
+            log_dir="logs",
+            level=config.logging.level,
+            log_format=config.logging.format
+        )
+
+        logger = get_logger()
+
+        # Initialize task queue and proxy manager
+        task_queue = init_task_queue(db)
+        proxy_manager = init_proxy_manager(db)
+
+        # Initialize and get profile manager
+        init_profile_manager()
+        profile_manager = get_profile_manager()
+        profile = profile_manager.get_profile_by_id(args.profile_id)
+
+        if not profile:
+            logger.error(f"Profile not found: {args.profile_id}")
+            return 1
+
+        # Validate profile
+        try:
+            profile_manager.validate_profile(profile)
+        except ValueError as e:
+            logger.error(f"Profile validation failed: {e}")
+            return 1
+
+        # Create and run worker
+        worker = AsyncWorker(
+            profile=profile,
+            group_id=args.group_id,
+            db=db,
+            task_queue=task_queue,
+            proxy_manager=proxy_manager,
+            use_simplified=args.simplified,
+            run_id=args.run_id
+        )
+        exit_code = await worker.run()
+        return exit_code
+
+    except KeyboardInterrupt:
+        print("\nWorker stopped by user")
+        return 0
+    except Exception as e:
+        print(f"Fatal error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
+    finally:
+        # Close database connection
+        if db:
+            await db.close()
 
 
 def main():
@@ -432,6 +412,7 @@ def main():
     parser.add_argument(
         '--simplified',
         action='store_true',
+        default=True,
         help="Use simplified browser automation"
     )
     parser.add_argument(
@@ -441,55 +422,8 @@ def main():
     )
 
     args = parser.parse_args()
-
-    try:
-        # Load configuration
-        config = load_config(args.config)
-
-        # Initialize database
-        init_database(config.database.absolute_path)
-
-        # Initialize logger
-        init_logger(
-            log_dir="logs",
-            level=config.logging.level,
-            log_format=config.logging.format
-        )
-
-        logger = get_logger()
-
-        # Initialize and get profile manager
-        init_profile_manager()
-        profile_manager = get_profile_manager()
-        profile = profile_manager.get_profile_by_id(args.profile_id)
-
-        if not profile:
-            logger.error(f"Profile not found: {args.profile_id}")
-            sys.exit(1)
-
-        # Validate profile
-        try:
-            profile_manager.validate_profile(profile)
-        except ValueError as e:
-            logger.error(f"Profile validation failed: {e}")
-            sys.exit(1)
-
-        # Create and run worker
-        worker = Worker(
-            profile,
-            args.group_id,
-            use_simplified=args.simplified,
-            run_id=args.run_id
-        )
-        exit_code = worker.run()
-        sys.exit(exit_code)
-
-    except KeyboardInterrupt:
-        print("\nWorker stopped by user")
-        sys.exit(0)
-    except Exception as e:
-        print(f"Fatal error: {e}", file=sys.stderr)
-        sys.exit(1)
+    exit_code = asyncio.run(async_main(args))
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

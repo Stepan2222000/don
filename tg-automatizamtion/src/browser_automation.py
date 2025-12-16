@@ -288,7 +288,8 @@ class BrowserAutomation:
         self,
         profile: DonutProfile,
         url: str = "https://web.telegram.org/k",
-        proxy_override: Optional[str] = None
+        proxy_override: Optional[str] = None,
+        disable_proxy: bool = False
     ) -> Page:
         """
         Launch browser with profile using nodecar CLI.
@@ -300,6 +301,7 @@ class BrowserAutomation:
             url: URL to open (default: Telegram Web)
             proxy_override: Optional proxy URL to use instead of profile's proxy
                            Format: "http://user:pass@host:port"
+            disable_proxy: If True, ignore all proxy settings (proxy_override and profile.proxy)
 
         Returns:
             Playwright Page object
@@ -321,13 +323,16 @@ class BrowserAutomation:
             # Connect to browser with Playwright
             self.playwright = sync_playwright().start()
 
-            # Prepare proxy config - proxy_override takes precedence
-            # Playwright requires separate username/password, not embedded in URL
-            proxy_url = proxy_override if proxy_override else profile.proxy
-            proxy_config = _parse_proxy_url(proxy_url) if proxy_url else None
-
-            if proxy_override:
-                logger.info(f"Using proxy override: {proxy_override.split('@')[-1] if '@' in proxy_override else proxy_override}")
+            # Prepare proxy config - if disabled, ignore all proxy settings
+            if disable_proxy:
+                proxy_config = None
+                logger.info("Proxy disabled - running without proxy")
+            else:
+                # proxy_override takes precedence over profile.proxy
+                proxy_url = proxy_override if proxy_override else profile.proxy
+                proxy_config = _parse_proxy_url(proxy_url) if proxy_url else None
+                if proxy_override:
+                    logger.info(f"Using proxy override: {proxy_override.split('@')[-1] if '@' in proxy_override else proxy_override}")
 
             # Launch persistent context with fingerprint
             config = get_config()
@@ -445,7 +450,8 @@ class BrowserAutomationSimplified:
         self,
         profile: DonutProfile,
         url: str = "https://web.telegram.org/k",
-        proxy_override: Optional[str] = None
+        proxy_override: Optional[str] = None,
+        disable_proxy: bool = False
     ) -> Page:
         """
         Launch browser with Playwright directly.
@@ -455,6 +461,7 @@ class BrowserAutomationSimplified:
             url: URL to open
             proxy_override: Optional proxy URL to use instead of profile's proxy
                            Format: "http://user:pass@host:port"
+            disable_proxy: If True, ignore all proxy settings (proxy_override and profile.proxy)
 
         Returns:
             Playwright Page object
@@ -473,13 +480,16 @@ class BrowserAutomationSimplified:
         self.playwright = sync_playwright().start()
 
         # Launch persistent context with fingerprint
-        # Playwright requires separate username/password, not embedded in URL
-        # proxy_override takes precedence over profile.proxy
-        proxy_url = proxy_override if proxy_override else profile.proxy
-        proxy_config = _parse_proxy_url(proxy_url) if proxy_url else None
-
-        if proxy_override:
-            logger.info(f"Using proxy override: {proxy_override.split('@')[-1] if '@' in proxy_override else proxy_override}")
+        # If proxy disabled, ignore all proxy settings
+        if disable_proxy:
+            proxy_config = None
+            logger.info("Proxy disabled - running without proxy")
+        else:
+            # proxy_override takes precedence over profile.proxy
+            proxy_url = proxy_override if proxy_override else profile.proxy
+            proxy_config = _parse_proxy_url(proxy_url) if proxy_url else None
+            if proxy_override:
+                logger.info(f"Using proxy override: {proxy_override.split('@')[-1] if '@' in proxy_override else proxy_override}")
         config = get_config()
 
         self.context = self.playwright.firefox.launch_persistent_context(

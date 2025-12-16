@@ -127,11 +127,22 @@ class DatabaseConfig:
 @dataclass
 class ProxyConfig:
     """Proxy management configuration."""
+    enabled: bool = True                              # Глобальный переключатель прокси
+    disabled_profiles: List[str] = field(default_factory=list)  # UUID профилей без прокси
     pool_file: str = "data/proxies.txt"
     min_attempts_for_check: int = 10          # Мин. попыток перед анализом
     chat_not_found_threshold: int = 40        # % для ротации
     unblock_tasks_on_rotate: bool = True      # Разблокировать задачи при ротации
     health_reset_hours: int = 1               # Через сколько часов дать "второй шанс"
+
+    def __post_init__(self):
+        """Validate and normalize disabled_profiles."""
+        # Защита от null в YAML
+        if self.disabled_profiles is None:
+            self.disabled_profiles = []
+        # Защита от string вместо list
+        if isinstance(self.disabled_profiles, str):
+            self.disabled_profiles = [self.disabled_profiles]
 
     @property
     def absolute_pool_path(self) -> str:
