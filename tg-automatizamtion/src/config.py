@@ -266,14 +266,18 @@ class Config:
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
         return {
-            'limits': self.limits.__dict__,
-            'timeouts': self.timeouts.__dict__,
-            'telegram': self.telegram.__dict__,
-            'retry': self.retry.__dict__,
-            'screenshots': self.screenshots.__dict__,
-            'logging': self.logging.__dict__,
-            'database': self.database.__dict__,
-            'proxy': self.proxy.__dict__
+            'limits': self.limits.__dict__.copy(),
+            'timeouts': self.timeouts.__dict__.copy(),
+            'telegram': self.telegram.__dict__.copy(),
+            'retry': self.retry.__dict__.copy(),
+            'screenshots': self.screenshots.__dict__.copy(),
+            'logging': self.logging.__dict__.copy(),
+            'database': {
+                'type': self.database.type,
+                'postgresql': self.database.postgresql.__dict__.copy(),
+                'sqlite': self.database.sqlite.__dict__.copy()
+            },
+            'proxy': self.proxy.__dict__.copy()
         }
 
     def save_to_file(self, config_path: str = None):
