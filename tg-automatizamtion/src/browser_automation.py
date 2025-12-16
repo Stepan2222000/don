@@ -1,8 +1,8 @@
 """
-Browser Automation module for Telegram Automation System
+Browser Automation module for Telegram Automation System (ASYNC VERSION)
 
 Launches Donut Browser profiles using nodecar CLI (emulates "Launch" button).
-Provides Playwright integration for browser control.
+Provides Playwright async integration for browser control.
 """
 
 import subprocess
@@ -12,7 +12,7 @@ import platform
 import os
 from pathlib import Path
 from typing import Optional
-from playwright.sync_api import sync_playwright, Browser, Page, PlaywrightContextManager
+from playwright.async_api import async_playwright, Browser, Page, Playwright
 
 from .profile_manager import DonutProfile
 from .logger import get_logger
@@ -53,7 +53,7 @@ def _parse_proxy_url(proxy_url: str) -> dict:
     return config
 
 
-def _check_qr_code_page(page: Page, logger) -> bool:
+async def _check_qr_code_page(page: Page, logger) -> bool:
     """
     Check if current page is QR code login page (session expired).
 
@@ -63,7 +63,7 @@ def _check_qr_code_page(page: Page, logger) -> bool:
     - .qr-description - QR code description text
 
     Args:
-        page: Playwright Page object
+        page: Playwright Page object (async)
         logger: Logger instance
 
     Returns:
@@ -78,7 +78,7 @@ def _check_qr_code_page(page: Page, logger) -> bool:
     for selector in qr_selectors:
         try:
             locator = page.locator(selector)
-            if locator.count() > 0 and locator.first.is_visible():
+            if await locator.count() > 0 and await locator.first.is_visible():
                 logger.warning(f"QR code page detected (selector: {selector})")
                 return True
         except Exception:
@@ -87,14 +87,14 @@ def _check_qr_code_page(page: Page, logger) -> bool:
     return False
 
 
-def _verify_telegram_loaded(page: Page, logger) -> tuple[bool, list[str]]:
+async def _verify_telegram_loaded(page: Page, logger) -> tuple[bool, list[str]]:
     """
     Verify that Telegram UI has loaded properly.
 
     Checks for presence AND visibility of critical UI elements to detect white/blank page.
 
     Args:
-        page: Playwright Page object
+        page: Playwright Page object (async)
         logger: Logger instance
 
     Returns:
@@ -116,7 +116,7 @@ def _verify_telegram_loaded(page: Page, logger) -> tuple[bool, list[str]]:
 
     for selector, description in elements_to_check.items():
         locator = page.locator(selector)
-        element_count = locator.count()
+        element_count = await locator.count()
 
         # Check if element exists
         if element_count == 0:
@@ -125,7 +125,7 @@ def _verify_telegram_loaded(page: Page, logger) -> tuple[bool, list[str]]:
             continue
 
         # Check if element is visible
-        is_visible = locator.first.is_visible()
+        is_visible = await locator.first.is_visible()
         logger.debug(f"Checking {description} ({selector}): {'VISIBLE' if is_visible else 'NOT VISIBLE'}")
 
         if not is_visible:
@@ -141,7 +141,7 @@ def _verify_telegram_loaded(page: Page, logger) -> tuple[bool, list[str]]:
     return is_loaded, missing_elements
 
 
-def _load_telegram_with_retry(page: Page, url: str, logger, max_retries: int = 3) -> None:
+async def _load_telegram_with_retry(page: Page, url: str, logger, max_retries: int = 3) -> None:
     """
     Load Telegram with retry logic and white page detection.
 
@@ -149,7 +149,7 @@ def _load_telegram_with_retry(page: Page, url: str, logger, max_retries: int = 3
     Takes screenshots of failed attempts for debugging.
 
     Args:
-        page: Playwright Page object
+        page: Playwright Page object (async)
         url: URL to load (should be https://web.telegram.org/k)
         logger: Logger instance
         max_retries: Maximum number of reload attempts (default: 3)
@@ -164,26 +164,26 @@ def _load_telegram_with_retry(page: Page, url: str, logger, max_retries: int = 3
         logger.info(f"Loading Telegram (attempt {attempt_num}/{max_retries})...")
 
         # Navigate to URL
-        page.goto(url, timeout=30000)
+        await page.goto(url, timeout=30000)
 
         # Wait for page to load - multiple load states for reliability
-        page.wait_for_load_state("domcontentloaded", timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=30000)
+        await page.wait_for_load_state("domcontentloaded", timeout=30000)
+        await page.wait_for_load_state("networkidle", timeout=30000)
 
         # Additional wait for React to render UI (increased from 5s to 15s)
         logger.debug("Waiting for React UI to render...")
-        page.wait_for_timeout(15000)
+        await page.wait_for_timeout(15000)
 
         # CHECK FOR QR CODE PAGE FIRST (session expired)
         # This should NOT be retried - user needs to re-login manually
-        if _check_qr_code_page(page, logger):
+        if await _check_qr_code_page(page, logger):
             logger.error("Session expired - QR code login page detected")
             # Save screenshot for debugging
             try:
                 screenshot_dir = Path("logs/screenshots")
                 screenshot_dir.mkdir(parents=True, exist_ok=True)
                 screenshot_path = screenshot_dir / "qr_code_page_detected.png"
-                page.screenshot(path=str(screenshot_path))
+                await page.screenshot(path=str(screenshot_path))
                 logger.info(f"QR code screenshot saved: {screenshot_path}")
             except Exception as e:
                 logger.error(f"Failed to save QR screenshot: {e}")
@@ -191,12 +191,12 @@ def _load_telegram_with_retry(page: Page, url: str, logger, max_retries: int = 3
             raise QRCodePageDetectedError("Profile session expired - QR code login required")
 
         # Verify Telegram UI loaded (check for critical elements)
-        is_loaded, missing_elements = _verify_telegram_loaded(page, logger)
+        is_loaded, missing_elements = await _verify_telegram_loaded(page, logger)
 
         if is_loaded:
             # Additional stabilization wait after successful check
             logger.debug("Elements verified, waiting for UI stabilization...")
-            page.wait_for_timeout(5000)
+            await page.wait_for_timeout(5000)
             logger.info(f"✓ Telegram loaded successfully on attempt {attempt_num}")
             return
 
@@ -210,7 +210,7 @@ def _load_telegram_with_retry(page: Page, url: str, logger, max_retries: int = 3
             screenshot_dir.mkdir(parents=True, exist_ok=True)
             screenshot_path = screenshot_dir / f"white_page_attempt_{attempt_num}.png"
 
-            page.screenshot(path=str(screenshot_path))
+            await page.screenshot(path=str(screenshot_path))
             logger.info(f"Screenshot saved: {screenshot_path}")
         except Exception as e:
             logger.error(f"Failed to save screenshot: {e}")
@@ -218,8 +218,8 @@ def _load_telegram_with_retry(page: Page, url: str, logger, max_retries: int = 3
         # If not last attempt, reload and retry
         if attempt_num < max_retries:
             logger.info(f"Reloading page for retry {attempt_num + 1}...")
-            page.reload(timeout=30000)
-            page.wait_for_timeout(5000)
+            await page.reload(timeout=30000)
+            await page.wait_for_timeout(5000)
         else:
             # All attempts exhausted
             raise RuntimeError(
@@ -229,7 +229,7 @@ def _load_telegram_with_retry(page: Page, url: str, logger, max_retries: int = 3
 
 
 class BrowserAutomation:
-    """Browser automation using nodecar CLI and Playwright."""
+    """Browser automation using nodecar CLI and Playwright (ASYNC)."""
 
     def __init__(self, nodecar_path: Optional[str] = None):
         """
@@ -240,7 +240,7 @@ class BrowserAutomation:
         """
         # Note: nodecar is no longer used, we use Playwright directly (see launch_browser)
         self.nodecar_path = None  # Not needed
-        self.playwright: Optional[PlaywrightContextManager] = None
+        self.playwright: Optional[Playwright] = None
         self.browser: Optional[Browser] = None
         self.context = None
         self.page: Optional[Page] = None
@@ -284,7 +284,7 @@ class BrowserAutomation:
             "\n\nPlease specify nodecar_path manually."
         )
 
-    def launch_browser(
+    async def launch_browser(
         self,
         profile: DonutProfile,
         url: str = "https://web.telegram.org/k",
@@ -292,7 +292,7 @@ class BrowserAutomation:
         disable_proxy: bool = False
     ) -> Page:
         """
-        Launch browser with profile using nodecar CLI.
+        Launch browser with profile using nodecar CLI (ASYNC).
 
         This emulates clicking the "Launch" button in Donut Browser UI.
 
@@ -304,7 +304,7 @@ class BrowserAutomation:
             disable_proxy: If True, ignore all proxy settings (proxy_override and profile.proxy)
 
         Returns:
-            Playwright Page object
+            Playwright Page object (async)
 
         Raises:
             RuntimeError: If launch fails
@@ -320,8 +320,8 @@ class BrowserAutomation:
             fingerprint_config = json.loads(profile.fingerprint) if profile.fingerprint else {}
             env_vars = self._prepare_fingerprint_env(fingerprint_config)
 
-            # Connect to browser with Playwright
-            self.playwright = sync_playwright().start()
+            # Connect to browser with Playwright (async)
+            self.playwright = await async_playwright().start()
 
             # Prepare proxy config - if disabled, ignore all proxy settings
             if disable_proxy:
@@ -334,9 +334,9 @@ class BrowserAutomation:
                 if proxy_override:
                     logger.info(f"Using proxy override: {proxy_override.split('@')[-1] if '@' in proxy_override else proxy_override}")
 
-            # Launch persistent context with fingerprint
+            # Launch persistent context with fingerprint (async)
             config = get_config()
-            self.context = self.playwright.firefox.launch_persistent_context(
+            self.context = await self.playwright.firefox.launch_persistent_context(
                 user_data_dir=str(profile.browser_data_path),
                 executable_path=profile.executable_path,
                 headless=config.telegram.headless,
@@ -348,13 +348,13 @@ class BrowserAutomation:
             if self.context.pages:
                 self.page = self.context.pages[0]
             else:
-                self.page = self.context.new_page()
+                self.page = await self.context.new_page()
 
             # Navigate to URL with retry logic for white page detection
             if self.page.url != url:
                 logger.log_telegram_navigation(profile.profile_name)
-                # Use new retry logic with white page detection
-                _load_telegram_with_retry(self.page, url, logger, max_retries=3)
+                # Use new retry logic with white page detection (async)
+                await _load_telegram_with_retry(self.page, url, logger, max_retries=3)
 
             logger.info(f"Browser launched successfully: {profile.profile_name}")
             return self.page
@@ -397,21 +397,21 @@ class BrowserAutomation:
 
         return env_vars
 
-    def close_browser(self):
-        """Close browser and cleanup."""
+    async def close_browser(self):
+        """Close browser and cleanup (ASYNC)."""
         logger = get_logger()
 
         try:
             if self.page:
-                self.page.close()
+                await self.page.close()
                 self.page = None
 
             if self.context:
-                self.context.close()
+                await self.context.close()
                 self.context = None
 
             if self.playwright:
-                self.playwright.stop()
+                await self.playwright.stop()
                 self.playwright = None
 
             logger.debug("Browser closed successfully")
@@ -425,16 +425,16 @@ class BrowserAutomation:
             raise RuntimeError("Browser not launched. Call launch_browser() first.")
         return self.page
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close_browser()
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close_browser()
 
 
 class BrowserAutomationSimplified:
     """
-    Simplified browser automation for workers.
+    Simplified browser automation for workers (ASYNC).
 
     Uses Playwright directly without nodecar CLI.
     Faster startup but requires manual fingerprint configuration.
@@ -442,11 +442,11 @@ class BrowserAutomationSimplified:
 
     def __init__(self):
         """Initialize simplified browser automation."""
-        self.playwright: Optional[PlaywrightContextManager] = None
+        self.playwright: Optional[Playwright] = None
         self.context = None
         self.page: Optional[Page] = None
 
-    def launch_browser(
+    async def launch_browser(
         self,
         profile: DonutProfile,
         url: str = "https://web.telegram.org/k",
@@ -454,7 +454,7 @@ class BrowserAutomationSimplified:
         disable_proxy: bool = False
     ) -> Page:
         """
-        Launch browser with Playwright directly.
+        Launch browser with Playwright directly (ASYNC).
 
         Args:
             profile: DonutProfile to launch
@@ -464,7 +464,7 @@ class BrowserAutomationSimplified:
             disable_proxy: If True, ignore all proxy settings (proxy_override and profile.proxy)
 
         Returns:
-            Playwright Page object
+            Playwright Page object (async)
         """
         logger = get_logger()
         logger.log_browser_launch(profile.profile_name)
@@ -476,8 +476,8 @@ class BrowserAutomationSimplified:
         # Camoufox expects fingerprint in CAMOU_CONFIG_* env vars
         env_vars = self._prepare_fingerprint_env(fingerprint_config)
 
-        # Start Playwright
-        self.playwright = sync_playwright().start()
+        # Start Playwright (async)
+        self.playwright = await async_playwright().start()
 
         # Launch persistent context with fingerprint
         # If proxy disabled, ignore all proxy settings
@@ -492,7 +492,7 @@ class BrowserAutomationSimplified:
                 logger.info(f"Using proxy override: {proxy_override.split('@')[-1] if '@' in proxy_override else proxy_override}")
         config = get_config()
 
-        self.context = self.playwright.firefox.launch_persistent_context(
+        self.context = await self.playwright.firefox.launch_persistent_context(
             user_data_dir=str(profile.browser_data_path),
             executable_path=profile.executable_path,
             headless=config.telegram.headless,
@@ -504,12 +504,12 @@ class BrowserAutomationSimplified:
         if self.context.pages:
             self.page = self.context.pages[0]
         else:
-            self.page = self.context.new_page()
+            self.page = await self.context.new_page()
 
-        # Navigate to URL with retry logic for white page detection
+        # Navigate to URL with retry logic for white page detection (async)
         logger.log_telegram_navigation(profile.profile_name)
         # Use new retry logic with white page detection
-        _load_telegram_with_retry(self.page, url, logger, max_retries=3)
+        await _load_telegram_with_retry(self.page, url, logger, max_retries=3)
 
         logger.info(f"Browser launched successfully: {profile.profile_name}")
         return self.page
@@ -546,21 +546,21 @@ class BrowserAutomationSimplified:
 
         return env_vars
 
-    def close_browser(self):
-        """Close browser and cleanup."""
+    async def close_browser(self):
+        """Close browser and cleanup (ASYNC)."""
         logger = get_logger()
 
         try:
             if self.page:
-                self.page.close()
+                await self.page.close()
                 self.page = None
 
             if self.context:
-                self.context.close()
+                await self.context.close()
                 self.context = None
 
             if self.playwright:
-                self.playwright.stop()
+                await self.playwright.stop()
                 self.playwright = None
 
             logger.debug("Browser closed successfully")
@@ -574,8 +574,8 @@ class BrowserAutomationSimplified:
             raise RuntimeError("Browser not launched. Call launch_browser() first.")
         return self.page
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close_browser()
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close_browser()

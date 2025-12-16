@@ -110,7 +110,7 @@ class AsyncWorker:
 
             self.browser_automation = BrowserAutomationSimplified()
 
-            page = self.browser_automation.launch_browser(
+            page = await self.browser_automation.launch_browser(
                 self.profile,
                 url=self.config.telegram.url,
                 proxy_override=proxy.playwright_url if proxy else None,
@@ -193,7 +193,7 @@ class AsyncWorker:
             # Cleanup browser
             if self.browser_automation:
                 self.logger.info(f"Closing browser for profile: {self.profile.profile_name}")
-                self.browser_automation.close_browser()
+                await self.browser_automation.close_browser()
 
             self.logger.log_worker_stop(
                 self.profile.profile_name,
@@ -218,7 +218,7 @@ class AsyncWorker:
 
         try:
             # Step 1: Search for chat
-            chat_found = self.telegram.search_chat(chat_username)
+            chat_found = await self.telegram.search_chat(chat_username)
 
             if not chat_found:
                 # Chat not found - block task
@@ -227,7 +227,7 @@ class AsyncWorker:
                 return False
 
             # Step 2: Open chat
-            chat_opened = self.telegram.open_chat(chat_username)
+            chat_opened = await self.telegram.open_chat(chat_username)
 
             if not chat_opened:
                 # Failed to open chat
@@ -239,7 +239,7 @@ class AsyncWorker:
                 return False
 
             # Step 3: Check chat restrictions
-            restrictions = self.telegram.check_chat_restrictions()
+            restrictions = await self.telegram.check_chat_restrictions()
 
             # Check if can send
             if not restrictions.get('can_send'):
@@ -253,7 +253,7 @@ class AsyncWorker:
             message = await self.task_queue.get_random_message(self.group_id)
 
             # Step 5: Send message
-            sent = self.telegram.send_message(message)
+            sent = await self.telegram.send_message(message)
 
             if not sent:
                 # Failed to send - check error type
