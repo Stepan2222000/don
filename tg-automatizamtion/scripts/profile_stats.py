@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script for viewing profile statistics.
+Script for viewing profile statistics (async version).
 
 Usage:
     # Interactive mode
@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -21,108 +22,127 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import load_config
 from src.database import init_database
-from src.profile_manager import get_profile_by_name, get_all_profiles, print_profiles_table
+from src.profile_manager import init_profile_manager, get_profile_manager
 from interactive_utils import (
     show_header, show_menu, get_choice, get_input, show_profiles
 )
 
 
-def show_all_stats(days: int = 1):
-    """Show daily statistics for all profiles."""
+async def async_show_all_stats(days: int = 1):
+    """Show daily statistics for all profiles (async)."""
     try:
         config = load_config()
     except FileNotFoundError:
         print("Error: config.yaml not found. Run: python -m src.main init")
         return
 
-    db = init_database(config.database.absolute_path)
+    db = await init_database(config.database)
 
-    # Get stats
-    stats = db.get_all_profiles_daily_stats(days=days)
+    try:
+        # Get stats
+        stats = await db.get_all_profiles_daily_stats(days=days)
 
-    if not stats:
-        print(f"No statistics found for the last {days} day(s)")
+        if not stats:
+            print(f"No statistics found for the last {days} day(s)")
+            return
+
+        print(f"\nProfile Statistics (last {days} day(s))")
+        print("=" * 100)
+        print(f"{'Profile Name':<30} {'Date':<12} {'Messages':<10} {'Success':<10} {'Failed':<10} {'Success Rate':<12}")
+        print("=" * 100)
+
+        for stat in stats:
+            success_rate = 0
+            if stat['messages_sent'] > 0:
+                success_rate = (stat['successful_sends'] / stat['messages_sent']) * 100
+
+            print(f"{stat['profile_name']:<30} {stat['date']:<12} {stat['messages_sent']:<10} "
+                  f"{stat['successful_sends']:<10} {stat['failed_sends']:<10} {success_rate:<11.1f}%")
+
+        # Summary
+        total_messages = sum(s['messages_sent'] for s in stats)
+        total_success = sum(s['successful_sends'] for s in stats)
+        total_failed = sum(s['failed_sends'] for s in stats)
+
+        print("=" * 100)
+        print(f"{'TOTAL':<30} {'':<12} {total_messages:<10} {total_success:<10} {total_failed:<10} "
+              f"{(total_success / total_messages * 100) if total_messages > 0 else 0:<11.1f}%")
+    finally:
+        await db.close()
+
+
+def show_all_stats(days: int = 1):
+    """Show daily statistics for all profiles."""
+    asyncio.run(async_show_all_stats(days))
+
+
+async def async_show_profile_stats(profile_name: str, days: int = 7):
+    """Show detailed statistics for a specific profile (async)."""
+    init_profile_manager()
+    profile_manager = get_profile_manager()
+    profile = profile_manager.get_profile_by_name(profile_name)
+
+    if not profile:
+        print(f"Error: Profile '{profile_name}' not found.")
+        print("\nAvailable profiles:")
+        profile_manager.print_profiles_table()
         return
 
-    print(f"\nProfile Statistics (last {days} day(s))")
-    print("=" * 100)
-    print(f"{'Profile Name':<30} {'Date':<12} {'Messages':<10} {'Success':<10} {'Failed':<10} {'Success Rate':<12}")
-    print("=" * 100)
+    try:
+        config = load_config()
+    except FileNotFoundError:
+        print("Error: config.yaml not found. Run: python -m src.main init")
+        return
 
-    for stat in stats:
-        success_rate = 0
-        if stat['messages_sent'] > 0:
-            success_rate = (stat['successful_sends'] / stat['messages_sent']) * 100
+    db = await init_database(config.database)
 
-        print(f"{stat['profile_name']:<30} {stat['date']:<12} {stat['messages_sent']:<10} "
-              f"{stat['successful_sends']:<10} {stat['failed_sends']:<10} {success_rate:<11.1f}%")
+    try:
+        # Get stats
+        stats = await db.get_profile_daily_stats(profile.profile_id, days=days)
 
-    # Summary
-    total_messages = sum(s['messages_sent'] for s in stats)
-    total_success = sum(s['successful_sends'] for s in stats)
-    total_failed = sum(s['failed_sends'] for s in stats)
+        if not stats:
+            print(f"No statistics found for profile '{profile_name}' in the last {days} day(s)")
+            return
 
-    print("=" * 100)
-    print(f"{'TOTAL':<30} {'':<12} {total_messages:<10} {total_success:<10} {total_failed:<10} "
-          f"{(total_success / total_messages * 100) if total_messages > 0 else 0:<11.1f}%")
+        print(f"\nStatistics for profile: {profile_name}")
+        print(f"Profile ID: {profile.profile_id}")
+        print(f"Period: last {days} day(s)")
+        print("=" * 80)
+        print(f"{'Date':<12} {'Messages Sent':<15} {'Successful':<15} {'Failed':<15} {'Success Rate':<15}")
+        print("=" * 80)
+
+        total_messages = 0
+        total_success = 0
+        total_failed = 0
+
+        for stat in stats:
+            success_rate = 0
+            if stat['messages_sent'] > 0:
+                success_rate = (stat['successful_sends'] / stat['messages_sent']) * 100
+
+            print(f"{stat['date']:<12} {stat['messages_sent']:<15} {stat['successful_sends']:<15} "
+                  f"{stat['failed_sends']:<15} {success_rate:<14.1f}%")
+
+            total_messages += stat['messages_sent']
+            total_success += stat['successful_sends']
+            total_failed += stat['failed_sends']
+
+        print("=" * 80)
+        overall_success_rate = (total_success / total_messages * 100) if total_messages > 0 else 0
+        print(f"{'TOTAL':<12} {total_messages:<15} {total_success:<15} {total_failed:<15} {overall_success_rate:<14.1f}%")
+
+        # Calculate daily average
+        days_with_activity = len(stats)
+        if days_with_activity > 0:
+            avg_messages = total_messages / days_with_activity
+            print(f"\nDaily Average: {avg_messages:.1f} messages/day")
+    finally:
+        await db.close()
 
 
 def show_profile_stats(profile_name: str, days: int = 7):
     """Show detailed statistics for a specific profile."""
-    profile = get_profile_by_name(profile_name)
-    if not profile:
-        print(f"Error: Profile '{profile_name}' not found.")
-        print("\nAvailable profiles:")
-        print_profiles_table()
-        return
-
-    try:
-        config = load_config()
-    except FileNotFoundError:
-        print("Error: config.yaml not found. Run: python -m src.main init")
-        return
-
-    db = init_database(config.database.absolute_path)
-
-    # Get stats
-    stats = db.get_profile_daily_stats(profile.profile_id, days=days)
-
-    if not stats:
-        print(f"No statistics found for profile '{profile_name}' in the last {days} day(s)")
-        return
-
-    print(f"\nStatistics for profile: {profile_name}")
-    print(f"Profile ID: {profile.profile_id}")
-    print(f"Period: last {days} day(s)")
-    print("=" * 80)
-    print(f"{'Date':<12} {'Messages Sent':<15} {'Successful':<15} {'Failed':<15} {'Success Rate':<15}")
-    print("=" * 80)
-
-    total_messages = 0
-    total_success = 0
-    total_failed = 0
-
-    for stat in stats:
-        success_rate = 0
-        if stat['messages_sent'] > 0:
-            success_rate = (stat['successful_sends'] / stat['messages_sent']) * 100
-
-        print(f"{stat['date']:<12} {stat['messages_sent']:<15} {stat['successful_sends']:<15} "
-              f"{stat['failed_sends']:<15} {success_rate:<14.1f}%")
-
-        total_messages += stat['messages_sent']
-        total_success += stat['successful_sends']
-        total_failed += stat['failed_sends']
-
-    print("=" * 80)
-    overall_success_rate = (total_success / total_messages * 100) if total_messages > 0 else 0
-    print(f"{'TOTAL':<12} {total_messages:<15} {total_success:<15} {total_failed:<15} {overall_success_rate:<14.1f}%")
-
-    # Calculate daily average
-    days_with_activity = len(stats)
-    if days_with_activity > 0:
-        avg_messages = total_messages / days_with_activity
-        print(f"\nDaily Average: {avg_messages:.1f} messages/day")
+    asyncio.run(async_show_profile_stats(profile_name, days))
 
 
 def interactive_mode():

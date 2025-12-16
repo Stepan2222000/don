@@ -1,31 +1,21 @@
 """
 Database module for Telegram Automation System
 
-Provides PostgreSQL and SQLite database operations.
+Provides async PostgreSQL database operations using asyncpg.
 Manages profiles, tasks, messages, and logging.
 """
 
-import os
+import asyncio
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from datetime import datetime
-import threading
 
-# Try to import psycopg2 for PostgreSQL
-try:
-    import psycopg2
-    import psycopg2.extras
-    PSYCOPG2_AVAILABLE = True
-except ImportError:
-    PSYCOPG2_AVAILABLE = False
-
-# SQLite is always available
-import sqlite3
+import asyncpg
 
 
-class Database:
-    """Database manager with PostgreSQL and SQLite support."""
+class AsyncDatabase:
+    """Async database manager with asyncpg and connection pool."""
 
     def __init__(self, config):
         """
@@ -35,60 +25,32 @@ class Database:
             config: DatabaseConfig instance from config.py
         """
         self.config = config
-        self._local = threading.local()
+        self._pool: Optional[asyncpg.Pool] = None
+        self._pg_config = config.postgresql
 
-        if config.is_postgresql:
-            if not PSYCOPG2_AVAILABLE:
-                raise ImportError("psycopg2 not installed. Run: pip install psycopg2-binary")
-            self._db_type = "postgresql"
-            self._pg_config = config.postgresql
-        else:
-            self._db_type = "sqlite"
-            self._sqlite_path = config.sqlite.absolute_path
-            os.makedirs(os.path.dirname(self._sqlite_path), exist_ok=True)
+    async def connect(self):
+        """Create connection pool and initialize schema."""
+        self._pool = await asyncpg.create_pool(
+            host=self._pg_config.host,
+            port=self._pg_config.port,
+            database=self._pg_config.database,
+            user=self._pg_config.user,
+            password=self._pg_config.password,
+            min_size=2,
+            max_size=10,
+            command_timeout=60
+        )
+        await self._initialize_database()
 
-        # Initialize database schema
-        self._initialize_database()
+    async def close(self):
+        """Close connection pool."""
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
 
-    def _get_connection(self):
-        """Get thread-local database connection."""
-        if not hasattr(self._local, 'connection') or self._local.connection is None:
-            if self._db_type == "postgresql":
-                self._local.connection = psycopg2.connect(
-                    host=self._pg_config.host,
-                    port=self._pg_config.port,
-                    database=self._pg_config.database,
-                    user=self._pg_config.user,
-                    password=self._pg_config.password
-                )
-                self._local.connection.autocommit = False
-            else:
-                self._local.connection = sqlite3.connect(
-                    self._sqlite_path,
-                    check_same_thread=False,
-                    timeout=30.0
-                )
-                self._local.connection.row_factory = sqlite3.Row
-                self._local.connection.execute("PRAGMA foreign_keys=ON")
-
-        return self._local.connection
-
-    def _get_cursor(self, conn):
-        """Get cursor with appropriate row factory."""
-        if self._db_type == "postgresql":
-            return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        return conn.cursor()
-
-    def _placeholder(self) -> str:
-        """Get placeholder for parameterized queries."""
-        return "%s" if self._db_type == "postgresql" else "?"
-
-    def _initialize_database(self):
+    async def _initialize_database(self):
         """Initialize database schema."""
-        if self._db_type == "postgresql":
-            schema_path = Path(__file__).parent.parent / 'db' / 'schema_postgresql.sql'
-        else:
-            schema_path = Path(__file__).parent.parent / 'db' / 'schema.sql'
+        schema_path = Path(__file__).parent.parent / 'db' / 'schema_postgresql.sql'
 
         if not schema_path.exists():
             raise FileNotFoundError(f"Schema file not found: {schema_path}")
@@ -96,318 +58,306 @@ class Database:
         with open(schema_path, 'r', encoding='utf-8') as f:
             schema_sql = f.read()
 
-        conn = self._get_connection()
-
-        if self._db_type == "postgresql":
-            cursor = conn.cursor()
+        async with self._pool.acquire() as conn:
             # Split by semicolon and execute each statement
             statements = [s.strip() for s in schema_sql.split(';') if s.strip()]
             for statement in statements:
                 if statement and not statement.startswith('--'):
                     try:
-                        cursor.execute(statement)
-                    except psycopg2.errors.DuplicateTable:
-                        conn.rollback()
+                        await conn.execute(statement)
+                    except asyncpg.exceptions.DuplicateTableError:
                         continue
-                    except psycopg2.errors.DuplicateObject:
-                        conn.rollback()
+                    except asyncpg.exceptions.DuplicateObjectError:
                         continue
-            conn.commit()
-        else:
-            conn.executescript(schema_sql)
-            conn.commit()
 
-    @contextmanager
-    def transaction(self, mode: str = 'DEFERRED'):
-        """Context manager for database transactions."""
-        conn = self._get_connection()
-        try:
-            if self._db_type == "sqlite" and mode != 'DEFERRED':
-                conn.execute(f"BEGIN {mode}")
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-
-    def close(self):
-        """Close thread-local database connection."""
-        if hasattr(self._local, 'connection') and self._local.connection:
-            try:
-                self._local.connection.close()
-                self._local.connection = None
-            except Exception as e:
-                print(f"Warning: Error closing database connection: {e}")
-
-    def _row_to_dict(self, row) -> Optional[Dict[str, Any]]:
-        """Convert row to dictionary."""
-        if row is None:
-            return None
-        if self._db_type == "postgresql":
-            return dict(row)
-        return dict(row)
-
-    def _rows_to_list(self, rows) -> List[Dict[str, Any]]:
-        """Convert rows to list of dictionaries."""
-        return [self._row_to_dict(row) for row in rows]
+    @asynccontextmanager
+    async def transaction(self):
+        """Async context manager for database transactions."""
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                yield conn
 
     # ========================================
     # Profiles operations
     # ========================================
 
-    def add_profile(self, profile_id: str, profile_name: str) -> int:
+    async def add_profile(self, profile_id: str, profile_name: str) -> int:
         """Add profile to database."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            if self._db_type == "postgresql":
-                cursor.execute(f"""
-                    INSERT INTO profiles (profile_id, profile_name)
-                    VALUES ({ph}, {ph})
-                    ON CONFLICT(profile_id) DO UPDATE SET
-                        profile_name = EXCLUDED.profile_name,
-                        updated_at = CURRENT_TIMESTAMP
-                    RETURNING id
-                """, (profile_id, profile_name))
-            else:
-                cursor.execute(f"""
-                    INSERT INTO profiles (profile_id, profile_name)
-                    VALUES ({ph}, {ph})
-                    ON CONFLICT(profile_id) DO UPDATE SET
-                        profile_name = excluded.profile_name,
-                        updated_at = CURRENT_TIMESTAMP
-                    RETURNING id
-                """, (profile_id, profile_name))
-            return cursor.fetchone()[0] if self._db_type == "sqlite" else cursor.fetchone()['id']
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval('''
+                INSERT INTO profiles (profile_id, profile_name)
+                VALUES ($1, $2)
+                ON CONFLICT(profile_id) DO UPDATE SET
+                    profile_name = EXCLUDED.profile_name,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING id
+            ''', profile_id, profile_name)
 
-    def get_active_profiles(self) -> List[Dict[str, Any]]:
+    async def get_active_profiles(self) -> List[Dict[str, Any]]:
         """Get all active profiles."""
-        conn = self._get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute("""
-            SELECT * FROM profiles
-            WHERE is_active = TRUE AND is_blocked = FALSE AND is_logged_out = FALSE
-            ORDER BY profile_name
-        """)
-        return self._rows_to_list(cursor.fetchall())
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT * FROM profiles
+                WHERE is_active = TRUE AND is_blocked = FALSE AND is_logged_out = FALSE
+                ORDER BY profile_name
+            ''')
+            return [dict(r) for r in rows]
 
-    def get_profile_by_id(self, profile_id: str) -> Optional[Dict[str, Any]]:
+    async def get_profile_by_id(self, profile_id: str) -> Optional[Dict[str, Any]]:
         """Get profile by profile_id."""
-        ph = self._placeholder()
-        conn = self._get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute(f"SELECT * FROM profiles WHERE profile_id = {ph}", (profile_id,))
-        return self._row_to_dict(cursor.fetchone())
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM profiles WHERE profile_id = $1",
+                profile_id
+            )
+            return dict(row) if row else None
 
-    def block_profile(self, profile_id: str):
+    async def block_profile(self, profile_id: str):
         """Mark profile as blocked."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"""
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
                 UPDATE profiles
                 SET is_blocked = TRUE, is_active = FALSE, updated_at = CURRENT_TIMESTAMP
-                WHERE profile_id = {ph}
-            """, (profile_id,))
+                WHERE profile_id = $1
+            ''', profile_id)
 
-    def mark_profile_logged_out(self, profile_id: str):
+    async def mark_profile_logged_out(self, profile_id: str):
         """Mark profile as logged out."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"""
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
                 UPDATE profiles
                 SET is_logged_out = TRUE, is_active = FALSE, updated_at = CURRENT_TIMESTAMP
-                WHERE profile_id = {ph}
-            """, (profile_id,))
+                WHERE profile_id = $1
+            ''', profile_id)
 
-    def update_profile_stats(self, profile_id: str):
+    async def update_profile_stats(self, profile_id: str):
         """Update profile statistics after sending message."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            if self._db_type == "postgresql":
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
                 # Reset hour counter if needed
-                cursor.execute(f"""
+                await conn.execute('''
                     UPDATE profiles
                     SET messages_sent_current_hour = 0,
                         hour_reset_time = CURRENT_TIMESTAMP
-                    WHERE profile_id = {ph}
+                    WHERE profile_id = $1
                       AND (hour_reset_time IS NULL
                            OR hour_reset_time + INTERVAL '1 hour' <= CURRENT_TIMESTAMP)
-                """, (profile_id,))
-            else:
-                cursor.execute(f"""
-                    UPDATE profiles
-                    SET messages_sent_current_hour = 0,
-                        hour_reset_time = CURRENT_TIMESTAMP
-                    WHERE profile_id = {ph}
-                      AND (hour_reset_time IS NULL
-                           OR datetime(hour_reset_time, '+1 hour') <= datetime('now'))
-                """, (profile_id,))
+                ''', profile_id)
 
-            # Increment messages sent
-            cursor.execute(f"""
-                UPDATE profiles
-                SET messages_sent_current_hour = messages_sent_current_hour + 1,
-                    last_message_time = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE profile_id = {ph}
-            """, (profile_id,))
+                # Increment messages sent
+                await conn.execute('''
+                    UPDATE profiles
+                    SET messages_sent_current_hour = messages_sent_current_hour + 1,
+                        last_message_time = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE profile_id = $1
+                ''', profile_id)
+
+    async def get_profile_messages_current_hour(self, profile_id: str) -> int:
+        """Get number of messages sent by profile in current hour."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT messages_sent_current_hour, hour_reset_time
+                FROM profiles WHERE profile_id = $1
+            ''', profile_id)
+            if not row:
+                return 0
+            # Check if hour has passed
+            if row['hour_reset_time'] is None:
+                return 0
+            # asyncpg returns datetime objects
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+            reset_time = row['hour_reset_time']
+            if hasattr(reset_time, 'tzinfo') and reset_time.tzinfo is None:
+                reset_time = reset_time.replace(tzinfo=timezone.utc)
+            if (now - reset_time).total_seconds() >= 3600:
+                return 0
+            return row['messages_sent_current_hour'] or 0
 
     # ========================================
     # Tasks operations
     # ========================================
 
-    def import_chats(self, group_id: str, chat_usernames: List[str], total_cycles: int = 1) -> int:
+    async def import_chats(self, group_id: str, chat_usernames: List[str], total_cycles: int = 1) -> int:
         """Import chats as tasks."""
-        ph = self._placeholder()
         count = 0
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            for username in chat_usernames:
-                if not username.startswith('@'):
-                    username = f'@{username}'
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for username in chat_usernames:
+                    if not username.startswith('@'):
+                        username = f'@{username}'
 
-                if self._db_type == "postgresql":
-                    cursor.execute(f"""
+                    await conn.execute('''
                         INSERT INTO tasks (group_id, chat_username, total_cycles)
-                        VALUES ({ph}, {ph}, {ph})
+                        VALUES ($1, $2, $3)
                         ON CONFLICT(group_id, chat_username) DO UPDATE SET
                             total_cycles = EXCLUDED.total_cycles
-                    """, (group_id, username, total_cycles))
-                else:
-                    cursor.execute(f"""
-                        INSERT INTO tasks (group_id, chat_username, total_cycles)
-                        VALUES ({ph}, {ph}, {ph})
-                        ON CONFLICT(group_id, chat_username) DO UPDATE SET
-                            total_cycles = excluded.total_cycles
-                    """, (group_id, username, total_cycles))
-                count += 1
+                    ''', group_id, username, total_cycles)
+                    count += 1
         return count
 
-    def get_task_by_id(self, task_id: int) -> Optional[Dict[str, Any]]:
+    async def get_task_by_id(self, task_id: int) -> Optional[Dict[str, Any]]:
         """Get task by ID."""
-        ph = self._placeholder()
-        conn = self._get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute(f"SELECT * FROM tasks WHERE id = {ph}", (task_id,))
-        return self._row_to_dict(cursor.fetchone())
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM tasks WHERE id = $1", task_id)
+            return dict(row) if row else None
 
-    def block_task(self, task_id: int, reason: str):
+    async def block_task(self, task_id: int, reason: str):
         """Mark task as blocked."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"""
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
                 UPDATE tasks
                 SET is_blocked = TRUE,
-                    block_reason = {ph},
+                    block_reason = $1,
                     status = 'blocked',
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = {ph}
-            """, (reason, task_id))
+                WHERE id = $2
+            ''', reason, task_id)
 
-    def increment_task_success(self, task_id: int):
+    async def increment_task_success(self, task_id: int):
         """Increment success counter."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"""
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
                 UPDATE tasks
                 SET success_count = success_count + 1,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = {ph}
-            """, (task_id,))
+                WHERE id = $1
+            ''', task_id)
 
-    def increment_task_failed(self, task_id: int):
+    async def increment_task_failed(self, task_id: int):
         """Increment failed counter."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"""
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
                 UPDATE tasks
                 SET failed_count = failed_count + 1,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = {ph}
-            """, (task_id,))
+                WHERE id = $1
+            ''', task_id)
 
-    def increment_completed_cycles(self, task_id: int):
+    async def increment_completed_cycles(self, task_id: int):
         """Increment completed cycles counter."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow('''
                 UPDATE tasks
                 SET completed_cycles = completed_cycles + 1,
                     last_attempt_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = {ph}
+                WHERE id = $1
                 RETURNING completed_cycles, total_cycles
-            """, (task_id,))
-            row = cursor.fetchone()
-            if row:
-                completed = row['completed_cycles'] if self._db_type == "postgresql" else row[0]
-                total = row['total_cycles'] if self._db_type == "postgresql" else row[1]
-                if completed >= total:
-                    cursor.execute(f"UPDATE tasks SET status = 'completed' WHERE id = {ph}", (task_id,))
+            ''', task_id)
+            if row and row['completed_cycles'] >= row['total_cycles']:
+                await conn.execute(
+                    "UPDATE tasks SET status = 'completed' WHERE id = $1",
+                    task_id
+                )
 
-    def set_task_next_available(self, task_id: int, delay_seconds: int):
+    async def set_task_next_available(self, task_id: int, delay_seconds: int):
         """Set when task will be available again."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            if self._db_type == "postgresql":
-                cursor.execute(f"""
-                    UPDATE tasks
-                    SET next_available_at = CURRENT_TIMESTAMP + INTERVAL '{delay_seconds} seconds',
-                        status = 'pending',
-                        assigned_profile_id = NULL
-                    WHERE id = {ph}
-                """, (task_id,))
-            else:
-                cursor.execute(f"""
-                    UPDATE tasks
-                    SET next_available_at = datetime('now', '+' || {ph} || ' seconds'),
-                        status = 'pending',
-                        assigned_profile_id = NULL
-                    WHERE id = {ph}
-                """, (delay_seconds, task_id))
+        # Validate delay_seconds is an integer to prevent SQL injection
+        delay_seconds = int(delay_seconds)
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE tasks
+                SET next_available_at = CURRENT_TIMESTAMP + make_interval(secs => $1),
+                    status = 'pending',
+                    assigned_profile_id = NULL
+                WHERE id = $2
+            ''', delay_seconds, task_id)
 
-    def reset_task_status(self, task_id: int):
+    async def reset_task_status(self, task_id: int):
         """Reset task status to pending."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"""
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
                 UPDATE tasks
                 SET status = 'pending',
                     assigned_profile_id = NULL
-                WHERE id = {ph}
-            """, (task_id,))
+                WHERE id = $1
+            ''', task_id)
 
-    def get_task_stats(self) -> Dict[str, int]:
+    async def get_task_stats(self) -> Dict[str, int]:
         """Get overall task statistics."""
-        conn = self._get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute("""
-            SELECT
-                COUNT(*) as total,
-                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-                SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-                SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked,
-                SUM(success_count) as total_success,
-                SUM(failed_count) as total_failed
-            FROM tasks
-        """)
-        return self._row_to_dict(cursor.fetchone()) or {}
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+                    SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                    SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked,
+                    SUM(success_count) as total_success,
+                    SUM(failed_count) as total_failed
+                FROM tasks
+            ''')
+            return dict(row) if row else {}
+
+    async def get_pending_tasks_count(self, group_id: str) -> int:
+        """Get count of pending tasks for a group."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval('''
+                SELECT COUNT(*) FROM tasks
+                WHERE group_id = $1
+                  AND status = 'pending'
+                  AND is_blocked = FALSE
+                  AND (next_available_at IS NULL OR next_available_at <= CURRENT_TIMESTAMP)
+            ''', group_id)
+
+    async def get_next_task(
+        self,
+        group_id: str,
+        profile_id: str,
+        run_id: str,
+        max_cycles: int
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Atomically get and assign next available task.
+        Returns None if no tasks available.
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                # First, find a suitable task
+                row = await conn.fetchrow('''
+                    SELECT t.* FROM tasks t
+                    WHERE t.group_id = $1
+                      AND t.status = 'pending'
+                      AND t.is_blocked = FALSE
+                      AND (t.next_available_at IS NULL OR t.next_available_at <= CURRENT_TIMESTAMP)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM task_attempts ta
+                          WHERE ta.task_id = t.id
+                            AND ta.run_id = $2
+                            AND ta.status = 'success'
+                      )
+                      AND (
+                          SELECT COUNT(*) FROM task_attempts ta
+                          WHERE ta.task_id = t.id AND ta.run_id = $2
+                      ) < $3
+                    ORDER BY t.last_attempt_at ASC NULLS FIRST, t.id ASC
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                ''', group_id, run_id, max_cycles)
+
+                if not row:
+                    return None
+
+                task_id = row['id']
+
+                # Assign the task
+                await conn.execute('''
+                    UPDATE tasks
+                    SET status = 'in_progress',
+                        assigned_profile_id = $1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $2
+                ''', profile_id, task_id)
+
+                return dict(row)
 
     # ========================================
     # Task attempts operations
     # ========================================
 
-    def add_task_attempt(
+    async def add_task_attempt(
         self,
         task_id: int,
         profile_id: str,
@@ -419,89 +369,76 @@ class Database:
         run_id: Optional[str] = None
     ) -> int:
         """Record task attempt."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval('''
                 INSERT INTO task_attempts (
                     task_id, profile_id, run_id, cycle_number, status,
                     message_text, error_type, error_message
                 )
-                VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 RETURNING id
-            """, (task_id, profile_id, run_id, cycle_number, status,
-                 message_text, error_type, error_message))
-            row = cursor.fetchone()
-            return row['id'] if self._db_type == "postgresql" else row[0]
+            ''', task_id, profile_id, run_id, cycle_number, status,
+                message_text, error_type, error_message)
 
-    def get_task_attempts_count_by_run(
+    async def get_task_attempts_count_by_run(
         self,
         task_id: int,
         run_id: str,
         status: Optional[str] = None
     ) -> int:
         """Get count of task attempts for specific run_id."""
-        ph = self._placeholder()
-        conn = self._get_connection()
-        cursor = self._get_cursor(conn)
-        if status:
-            cursor.execute(f"""
-                SELECT COUNT(*) as cnt FROM task_attempts
-                WHERE task_id = {ph} AND run_id = {ph} AND status = {ph}
-            """, (task_id, run_id, status))
-        else:
-            cursor.execute(f"""
-                SELECT COUNT(*) as cnt FROM task_attempts
-                WHERE task_id = {ph} AND run_id = {ph}
-            """, (task_id, run_id))
-        row = cursor.fetchone()
-        return row['cnt'] if self._db_type == "postgresql" else row[0]
+        async with self._pool.acquire() as conn:
+            if status:
+                return await conn.fetchval('''
+                    SELECT COUNT(*) FROM task_attempts
+                    WHERE task_id = $1 AND run_id = $2 AND status = $3
+                ''', task_id, run_id, status)
+            else:
+                return await conn.fetchval('''
+                    SELECT COUNT(*) FROM task_attempts
+                    WHERE task_id = $1 AND run_id = $2
+                ''', task_id, run_id)
 
     # ========================================
     # Messages operations
     # ========================================
 
-    def import_messages(self, group_id: str, messages: List[str]) -> int:
+    async def import_messages(self, group_id: str, messages: List[str]) -> int:
         """Import messages for sending."""
-        ph = self._placeholder()
         count = 0
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            for text in messages:
-                cursor.execute(f"""
-                    INSERT INTO messages (group_id, text)
-                    VALUES ({ph}, {ph})
-                """, (group_id, text))
-                count += 1
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for text in messages:
+                    await conn.execute('''
+                        INSERT INTO messages (group_id, text)
+                        VALUES ($1, $2)
+                    ''', group_id, text)
+                    count += 1
         return count
 
-    def get_active_messages(self, group_id: str) -> List[str]:
+    async def get_active_messages(self, group_id: str) -> List[str]:
         """Get all active messages for a group."""
-        ph = self._placeholder()
-        conn = self._get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute(f"SELECT text FROM messages WHERE group_id = {ph} AND is_active = TRUE", (group_id,))
-        rows = cursor.fetchall()
-        if self._db_type == "postgresql":
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT text FROM messages WHERE group_id = $1 AND is_active = TRUE",
+                group_id
+            )
             return [row['text'] for row in rows]
-        return [row[0] for row in rows]
 
-    def increment_message_usage(self, message_text: str):
+    async def increment_message_usage(self, message_text: str):
         """Increment usage counter for message."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"""
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
                 UPDATE messages
                 SET usage_count = usage_count + 1
-                WHERE text = {ph}
-            """, (message_text,))
+                WHERE text = $1
+            ''', message_text)
 
     # ========================================
     # Send log operations
     # ========================================
 
-    def log_send(
+    async def log_send(
         self,
         group_id: str,
         task_id: Optional[int],
@@ -513,26 +450,22 @@ class Database:
         error_details: Optional[str] = None
     ) -> int:
         """Log send attempt."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval('''
                 INSERT INTO send_log (
                     group_id, task_id, profile_id, chat_username,
                     message_text, status, error_type, error_details
                 )
-                VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 RETURNING id
-            """, (group_id, task_id, profile_id, chat_username,
-                 message_text, status, error_type, error_details))
-            row = cursor.fetchone()
-            return row['id'] if self._db_type == "postgresql" else row[0]
+            ''', group_id, task_id, profile_id, chat_username,
+                message_text, status, error_type, error_details)
 
     # ========================================
     # Screenshots operations
     # ========================================
 
-    def add_screenshot(
+    async def add_screenshot(
         self,
         log_id: Optional[int],
         screenshot_type: str,
@@ -540,179 +473,205 @@ class Database:
         description: Optional[str] = None
     ) -> int:
         """Record screenshot metadata."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval('''
                 INSERT INTO screenshots (log_id, screenshot_type, file_name, description)
-                VALUES ({ph}, {ph}, {ph}, {ph})
+                VALUES ($1, $2, $3, $4)
                 RETURNING id
-            """, (log_id, screenshot_type, file_name, description))
-            row = cursor.fetchone()
-            return row['id'] if self._db_type == "postgresql" else row[0]
+            ''', log_id, screenshot_type, file_name, description)
 
-    def cleanup_old_screenshots(self, days: int):
+    async def cleanup_old_screenshots(self, days: int):
         """Delete screenshot records older than N days."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            if self._db_type == "postgresql":
-                cursor.execute(f"""
-                    DELETE FROM screenshots
-                    WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '{days} days'
-                """)
-            else:
-                cursor.execute(f"""
-                    DELETE FROM screenshots
-                    WHERE created_at < datetime('now', '-' || {ph} || ' days')
-                """, (days,))
+        # Validate days is an integer to prevent SQL injection
+        days = int(days)
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
+                DELETE FROM screenshots
+                WHERE created_at < CURRENT_TIMESTAMP - make_interval(days => $1)
+            ''', days)
 
     # ========================================
     # Group operations
     # ========================================
 
-    def clear_group_tasks(self, group_id: str):
+    async def clear_group_tasks(self, group_id: str):
         """Clear all tasks for a group."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"DELETE FROM tasks WHERE group_id = {ph}", (group_id,))
+        async with self._pool.acquire() as conn:
+            await conn.execute("DELETE FROM tasks WHERE group_id = $1", group_id)
 
-    def clear_group_messages(self, group_id: str):
+    async def clear_group_messages(self, group_id: str):
         """Clear all messages for a group."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            cursor.execute(f"DELETE FROM messages WHERE group_id = {ph}", (group_id,))
+        async with self._pool.acquire() as conn:
+            await conn.execute("DELETE FROM messages WHERE group_id = $1", group_id)
 
-    def get_group_stats(self, group_id: str) -> Dict[str, Any]:
+    async def get_group_stats(self, group_id: str) -> Dict[str, Any]:
         """Get statistics for a group."""
-        ph = self._placeholder()
-        conn = self._get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute(f"SELECT * FROM group_stats WHERE group_id = {ph}", (group_id,))
-        return self._row_to_dict(cursor.fetchone()) or {}
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM group_stats WHERE group_id = $1",
+                group_id
+            )
+            return dict(row) if row else {}
 
-    def get_all_groups(self) -> List[str]:
+    async def get_all_groups(self) -> List[str]:
         """Get list of all group IDs."""
-        conn = self._get_connection()
-        cursor = self._get_cursor(conn)
-        cursor.execute("""
-            SELECT DISTINCT group_id FROM tasks
-            UNION
-            SELECT DISTINCT group_id FROM messages
-        """)
-        rows = cursor.fetchall()
-        if self._db_type == "postgresql":
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT DISTINCT group_id FROM tasks
+                UNION
+                SELECT DISTINCT group_id FROM messages
+            ''')
             return [row['group_id'] for row in rows]
-        return [row[0] for row in rows]
 
     # ========================================
     # Profile statistics operations
     # ========================================
 
-    def update_profile_daily_stats(self, profile_id: str, success: bool = True):
+    async def update_profile_daily_stats(self, profile_id: str, success: bool = True):
         """Update daily statistics for profile."""
-        ph = self._placeholder()
-        with self.transaction() as conn:
-            cursor = self._get_cursor(conn)
-            today = datetime.now().date().isoformat()
+        today = datetime.now().date()
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO profile_daily_stats (profile_id, date, messages_sent, successful_sends, failed_sends)
+                VALUES ($1, $2, 1, $3, $4)
+                ON CONFLICT(profile_id, date) DO UPDATE SET
+                    messages_sent = profile_daily_stats.messages_sent + 1,
+                    successful_sends = profile_daily_stats.successful_sends + $3,
+                    failed_sends = profile_daily_stats.failed_sends + $4,
+                    updated_at = CURRENT_TIMESTAMP
+            ''', profile_id, today, 1 if success else 0, 0 if success else 1)
 
-            if self._db_type == "postgresql":
-                cursor.execute(f"""
-                    INSERT INTO profile_daily_stats (profile_id, date, messages_sent, successful_sends, failed_sends)
-                    VALUES ({ph}, {ph}, 1, {ph}, {ph})
-                    ON CONFLICT(profile_id, date) DO UPDATE SET
-                        messages_sent = profile_daily_stats.messages_sent + 1,
-                        successful_sends = profile_daily_stats.successful_sends + {ph},
-                        failed_sends = profile_daily_stats.failed_sends + {ph},
-                        updated_at = CURRENT_TIMESTAMP
-                """, (profile_id, today, 1 if success else 0, 0 if success else 1,
-                     1 if success else 0, 0 if success else 1))
-            else:
-                cursor.execute(f"""
-                    INSERT INTO profile_daily_stats (profile_id, date, messages_sent, successful_sends, failed_sends)
-                    VALUES ({ph}, {ph}, 1, {ph}, {ph})
-                    ON CONFLICT(profile_id, date) DO UPDATE SET
-                        messages_sent = messages_sent + 1,
-                        successful_sends = successful_sends + {ph},
-                        failed_sends = failed_sends + {ph},
-                        updated_at = CURRENT_TIMESTAMP
-                """, (profile_id, today, 1 if success else 0, 0 if success else 1,
-                     1 if success else 0, 0 if success else 1))
-
-    def get_profile_daily_stats(self, profile_id: str, days: int = 7) -> List[Dict[str, Any]]:
+    async def get_profile_daily_stats(self, profile_id: str, days: int = 7) -> List[Dict[str, Any]]:
         """Get daily statistics for profile."""
-        ph = self._placeholder()
-        conn = self._get_connection()
-        cursor = self._get_cursor(conn)
-        if self._db_type == "postgresql":
-            cursor.execute(f"""
+        # Validate days is an integer to prevent SQL injection
+        days = int(days)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch('''
                 SELECT * FROM profile_daily_stats
-                WHERE profile_id = {ph}
-                  AND date >= CURRENT_DATE - INTERVAL '{days} days'
+                WHERE profile_id = $1
+                  AND date >= CURRENT_DATE - make_interval(days => $2)
                 ORDER BY date DESC
-            """, (profile_id,))
-        else:
-            cursor.execute(f"""
-                SELECT * FROM profile_daily_stats
-                WHERE profile_id = {ph}
-                  AND date >= date('now', '-' || {ph} || ' days')
-                ORDER BY date DESC
-            """, (profile_id, days))
-        return self._rows_to_list(cursor.fetchall())
+            ''', profile_id, days)
+            return [dict(r) for r in rows]
 
-    def get_all_profiles_daily_stats(self, days: int = 1) -> List[Dict[str, Any]]:
+    async def get_all_profiles_daily_stats(self, days: int = 1) -> List[Dict[str, Any]]:
         """Get daily statistics for all profiles."""
-        ph = self._placeholder()
-        conn = self._get_connection()
-        cursor = self._get_cursor(conn)
-        if self._db_type == "postgresql":
-            cursor.execute(f"""
+        # Validate days is an integer to prevent SQL injection
+        days = int(days)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch('''
                 SELECT
                     pds.*,
                     p.profile_name
                 FROM profile_daily_stats pds
                 JOIN profiles p ON p.profile_id = pds.profile_id
-                WHERE pds.date >= CURRENT_DATE - INTERVAL '{days} days'
+                WHERE pds.date >= CURRENT_DATE - make_interval(days => $1)
                 ORDER BY pds.date DESC, p.profile_name
-            """)
-        else:
-            cursor.execute(f"""
-                SELECT
-                    pds.*,
-                    p.profile_name
-                FROM profile_daily_stats pds
-                JOIN profiles p ON p.profile_id = pds.profile_id
-                WHERE pds.date >= date('now', '-' || {ph} || ' days')
-                ORDER BY pds.date DESC, p.profile_name
-            """, (days,))
-        return self._rows_to_list(cursor.fetchall())
+            ''', days)
+            return [dict(r) for r in rows]
+
+    # ========================================
+    # Proxy operations
+    # ========================================
+
+    async def get_proxy_for_profile(self, profile_id: str) -> Optional[str]:
+        """Get assigned proxy for profile."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval('''
+                SELECT proxy_url FROM proxy_assignments
+                WHERE profile_id = $1 AND is_healthy = TRUE AND is_blocked = FALSE
+            ''', profile_id)
+
+    async def assign_proxy(self, proxy_url: str, profile_id: str):
+        """Assign proxy to profile."""
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO proxy_assignments (proxy_url, profile_id, assigned_at)
+                VALUES ($1, $2, CURRENT_TIMESTAMP)
+                ON CONFLICT(proxy_url) DO UPDATE SET
+                    profile_id = $2,
+                    assigned_at = CURRENT_TIMESTAMP
+            ''', proxy_url, profile_id)
+
+    async def release_proxy(self, profile_id: str):
+        """Release proxy from profile."""
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE proxy_assignments
+                SET profile_id = NULL
+                WHERE profile_id = $1
+            ''', profile_id)
+
+    async def get_available_proxy(self) -> Optional[str]:
+        """Get available (unassigned, healthy) proxy."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval('''
+                SELECT proxy_url FROM proxy_assignments
+                WHERE profile_id IS NULL
+                  AND is_healthy = TRUE
+                  AND is_blocked = FALSE
+                ORDER BY last_rotation_at ASC NULLS FIRST
+                LIMIT 1
+            ''')
+
+    async def mark_proxy_unhealthy(self, proxy_url: str):
+        """Mark proxy as unhealthy."""
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE proxy_assignments
+                SET is_healthy = FALSE
+                WHERE proxy_url = $1
+            ''', proxy_url)
+
+    async def mark_proxy_blocked(self, proxy_url: str):
+        """Mark proxy as blocked."""
+        async with self._pool.acquire() as conn:
+            await conn.execute('''
+                UPDATE proxy_assignments
+                SET is_blocked = TRUE, is_healthy = FALSE
+                WHERE proxy_url = $1
+            ''', proxy_url)
+
+    async def get_all_proxies(self) -> List[Dict[str, Any]]:
+        """Get all proxies with their status."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT * FROM proxy_assignments
+                ORDER BY created_at
+            ''')
+            return [dict(r) for r in rows]
+
+    async def sync_proxies_from_file(self, proxies: List[str]) -> int:
+        """Sync proxies from list to database."""
+        count = 0
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for proxy_url in proxies:
+                    await conn.execute('''
+                        INSERT INTO proxy_assignments (proxy_url)
+                        VALUES ($1)
+                        ON CONFLICT(proxy_url) DO NOTHING
+                    ''', proxy_url)
+                    count += 1
+        return count
 
     # ========================================
     # Utility methods
     # ========================================
 
-    def __enter__(self):
+    async def __aenter__(self):
+        await self.connect()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
 
 
 # Global database instance
-_db_instance: Optional[Database] = None
+_db_instance: Optional[AsyncDatabase] = None
 
 
-def get_database() -> Database:
-    """Get global database instance."""
-    global _db_instance
-    if _db_instance is None:
-        raise RuntimeError("Database not initialized. Call init_database() first.")
-    return _db_instance
-
-
-def init_database(config) -> Database:
+async def init_database(config) -> AsyncDatabase:
     """
     Initialize global database instance.
 
@@ -720,5 +679,22 @@ def init_database(config) -> Database:
         config: DatabaseConfig instance from config.py
     """
     global _db_instance
-    _db_instance = Database(config)
+    _db_instance = AsyncDatabase(config)
+    await _db_instance.connect()
     return _db_instance
+
+
+def get_database() -> AsyncDatabase:
+    """Get global database instance."""
+    global _db_instance
+    if _db_instance is None:
+        raise RuntimeError("Database not initialized. Call await init_database() first.")
+    return _db_instance
+
+
+async def close_database():
+    """Close global database instance."""
+    global _db_instance
+    if _db_instance:
+        await _db_instance.close()
+        _db_instance = None

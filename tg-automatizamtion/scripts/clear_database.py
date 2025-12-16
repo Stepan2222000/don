@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Clear Database Script
+Clear Database Script (async version for PostgreSQL)
 
 Clears all data from database tables while preserving schema.
 Useful for starting fresh campaigns.
 """
 
-import sqlite3
+import asyncio
 import sys
 from pathlib import Path
 
@@ -14,14 +14,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import load_config, DEFAULT_CONFIG_PATH
+from src.database import init_database
 
 
-def clear_database(db_path: str, confirm: bool = True):
+async def async_clear_database(confirm: bool = True):
     """
-    Clear all data from database tables.
+    Clear all data from database tables (async).
 
     Args:
-        db_path: Path to SQLite database file
         confirm: Ask for confirmation before clearing
     """
     print("=" * 60)
@@ -29,32 +29,43 @@ def clear_database(db_path: str, confirm: bool = True):
     print("=" * 60)
     print()
 
-    # Check if database exists
-    if not Path(db_path).exists():
-        print(f"❌ Database not found: {db_path}")
-        sys.exit(1)
+    try:
+        config = load_config(DEFAULT_CONFIG_PATH)
+    except FileNotFoundError:
+        print("❌ Config file not found")
+        print("   Please create config first with: python -m src.main init")
+        return False
 
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    db = await init_database(config.database)
 
     try:
-        # Get list of all tables
-        cursor.execute("""
-            SELECT name FROM sqlite_master
-            WHERE type='table'
-            AND name NOT LIKE 'sqlite_%'
-            ORDER BY name
-        """)
-        tables = [row[0] for row in cursor.fetchall()]
+        # Get list of all tables and their row counts
+        tables_info = []
+        tables = [
+            'screenshots',
+            'send_log',
+            'task_attempts',
+            'tasks',
+            'messages',
+            'profile_daily_stats',
+            'proxy_assignments',
+            'profiles'
+        ]
 
-        if not tables:
+        async with db._pool.acquire() as conn:
+            for table in tables:
+                try:
+                    count = await conn.fetchval(f"SELECT COUNT(*) FROM {table}")
+                    tables_info.append((table, count))
+                except Exception:
+                    pass  # Table might not exist
+
+        if not tables_info:
             print("No tables found in database.")
-            return
+            return True
 
-        print(f"Found {len(tables)} tables:")
-        for table in tables:
-            cursor.execute(f"SELECT COUNT(*) FROM {table}")
-            count = cursor.fetchone()[0]
+        print(f"Found {len(tables_info)} tables:")
+        for table, count in tables_info:
             print(f"  - {table}: {count} rows")
 
         print()
@@ -64,13 +75,10 @@ def clear_database(db_path: str, confirm: bool = True):
             response = input("⚠️  Are you sure you want to DELETE ALL DATA? (yes/no): ")
             if response.lower() != 'yes':
                 print("❌ Cancelled")
-                sys.exit(0)
+                return False
 
         print()
         print("Clearing tables...")
-
-        # Disable foreign key constraints temporarily
-        cursor.execute("PRAGMA foreign_keys=OFF")
 
         # Clear tables in correct order (to handle foreign keys)
         tables_to_clear = [
@@ -80,27 +88,21 @@ def clear_database(db_path: str, confirm: bool = True):
             'tasks',
             'messages',
             'profile_daily_stats',
-            'profiles',
-            'groups'
+            'proxy_assignments',
+            'profiles'
         ]
 
         cleared_count = 0
-        for table in tables_to_clear:
-            if table in tables:
-                cursor.execute(f"DELETE FROM {table}")
-                rows_deleted = cursor.rowcount
-                print(f"  ✓ Cleared {table}: {rows_deleted} rows deleted")
-                cleared_count += 1
-
-        # Re-enable foreign key constraints
-        cursor.execute("PRAGMA foreign_keys=ON")
-
-        # Vacuum to reclaim space
-        print()
-        print("Optimizing database...")
-        cursor.execute("VACUUM")
-
-        conn.commit()
+        async with db._pool.acquire() as conn:
+            for table in tables_to_clear:
+                try:
+                    result = await conn.execute(f"DELETE FROM {table}")
+                    # Parse result like 'DELETE 5'
+                    rows_deleted = int(result.split()[-1]) if result else 0
+                    print(f"  ✓ Cleared {table}: {rows_deleted} rows deleted")
+                    cleared_count += 1
+                except Exception as e:
+                    print(f"  ⚠ Skipped {table}: {e}")
 
         print()
         print("=" * 60)
@@ -109,33 +111,31 @@ def clear_database(db_path: str, confirm: bool = True):
         print()
         print("Database is now empty and ready for new data.")
         print("You can now:")
-        print("  1. Import new chats: python -m src.main import-chats data/chats.txt")
-        print("  2. Import messages: python -m src.main import-messages data/messages.json")
+        print("  1. Import new chats: python -m src.main import-chats data/chats.txt --group group_1")
+        print("  2. Sync messages: python scripts/sync_group_messages.py --all")
         print("  3. Add profiles: python -m src.main add-profile ProfileName")
         print()
+        return True
 
     except Exception as e:
         print(f"❌ Error clearing database: {e}")
-        conn.rollback()
-        sys.exit(1)
+        return False
     finally:
-        conn.close()
+        await db.close()
+
+
+def clear_database(confirm: bool = True):
+    """Clear all data from database tables."""
+    return asyncio.run(async_clear_database(confirm))
 
 
 def main():
     """Main entry point."""
     try:
-        # Load config to get database path
-        config = load_config(DEFAULT_CONFIG_PATH)
-        db_path = config.database.absolute_path
-
-        # Clear database with confirmation
-        clear_database(db_path, confirm=True)
-
-    except FileNotFoundError:
-        print("❌ Config file not found")
-        print("   Please create config first with: python -m src.main init")
-        sys.exit(1)
+        if clear_database(confirm=True):
+            sys.exit(0)
+        else:
+            sys.exit(1)
     except Exception as e:
         print(f"❌ Error: {e}")
         sys.exit(1)

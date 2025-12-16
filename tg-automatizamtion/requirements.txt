@@ -6,8 +6,8 @@ playwright>=1.40.0
 # Configuration
 pyyaml>=6.0
 
-# Database - PostgreSQL
-psycopg2-binary>=2.9.9
+# Database - PostgreSQL (async)
+asyncpg>=0.29.0
 
 # Process monitoring (for profile watcher)
 psutil>=5.9.0

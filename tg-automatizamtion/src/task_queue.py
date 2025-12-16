@@ -1,7 +1,7 @@
 """
 Task Queue module for Telegram Automation System
 
-Manages task queue with atomic operations for concurrent workers.
+Manages async task queue with atomic operations for concurrent workers.
 Implements fair task distribution and cycle balancing.
 """
 
@@ -9,21 +9,21 @@ import random
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 
-from .database import get_database
+from .database import get_database, AsyncDatabase
 from .logger import get_logger
 from .config import get_config
 
 
-class TaskQueue:
-    """Task queue manager with atomic operations."""
+class AsyncTaskQueue:
+    """Async task queue manager with atomic operations."""
 
-    def __init__(self):
-        """Initialize task queue."""
-        self.db = get_database()
+    def __init__(self, db: AsyncDatabase):
+        """Initialize task queue with database instance."""
+        self.db = db
         self.config = get_config()
         self.logger = get_logger()
 
-    def get_next_incomplete_task(
+    async def get_next_incomplete_task(
         self,
         group_id: str,
         profile_id: str,
@@ -32,15 +32,8 @@ class TaskQueue:
         """
         Atomically get next incomplete task for worker from a specific group.
 
-        Uses UPDATE + RETURNING for atomicity to prevent race conditions
+        Uses FOR UPDATE SKIP LOCKED for atomicity to prevent race conditions
         between multiple workers.
-
-        If run_id is provided, uses session-based cycle counting (max_cycles per session).
-        Otherwise, uses global completed_cycles from database (legacy behavior).
-
-        Prioritization:
-        1. Tasks with fewer completed cycles in current session (balancing)
-        2. Tasks that haven't been attempted recently (fairness)
 
         Args:
             group_id: Campaign group ID
@@ -52,113 +45,41 @@ class TaskQueue:
         """
         try:
             # Check if profile has reached hourly limit
-            profile = self.db.get_profile_by_id(profile_id)
-            if profile:
-                # Handle None value for new profiles
-                messages_sent = profile['messages_sent_current_hour'] or 0
-                if messages_sent >= self.config.limits.max_messages_per_hour:
-                    self.logger.info(
-                        f"Profile {profile_id} reached hourly limit "
-                        f"({messages_sent}/{self.config.limits.max_messages_per_hour})"
-                    )
-                    return None
+            messages_sent = await self.db.get_profile_messages_current_hour(profile_id)
+            if messages_sent >= self.config.limits.max_messages_per_hour:
+                self.logger.info(
+                    f"Profile {profile_id} reached hourly limit "
+                    f"({messages_sent}/{self.config.limits.max_messages_per_hour})"
+                )
+                return None
 
-            # Use IMMEDIATE transaction to prevent race conditions
-            # This locks the database for writing, ensuring only one worker can
-            # select and update a task at a time.
-            with self.db.transaction(mode='IMMEDIATE') as conn:
-                # Use UPDATE + RETURNING for atomic operation
+            # Use database method for atomic task acquisition
+            task = await self.db.get_next_task(
+                group_id=group_id,
+                profile_id=profile_id,
+                run_id=run_id or '',
+                max_cycles=self.config.limits.max_cycles
+            )
+
+            if task:
                 if run_id:
-                    # Session-based: count successful attempts in current run_id
-                    cursor = conn.execute(
-                        """
-                        UPDATE tasks
-                        SET
-                            status = 'in_progress',
-                            assigned_profile_id = :profile_id,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = (
-                            SELECT t.id FROM tasks t
-                            WHERE
-                                t.group_id = :group_id
-                                AND t.is_blocked = 0
-                                AND (
-                                    SELECT COUNT(*)
-                                    FROM task_attempts ta
-                                    WHERE ta.task_id = t.id
-                                      AND ta.run_id = :run_id
-                                      AND ta.status = 'success'
-                                ) < :max_cycles
-                                AND (t.next_available_at IS NULL OR t.next_available_at <= CURRENT_TIMESTAMP)
-                                AND (t.status = 'pending' OR t.status = 'completed' OR (t.status = 'in_progress' AND t.assigned_profile_id = :profile_id))
-                            ORDER BY
-                                (
-                                    SELECT COUNT(*)
-                                    FROM task_attempts ta
-                                    WHERE ta.task_id = t.id
-                                      AND ta.run_id = :run_id
-                                      AND ta.status = 'success'
-                                ) ASC,                          -- Priority: fewer cycles in this session
-                                t.last_attempt_at ASC NULLS FIRST  -- Then: not attempted recently
-                            LIMIT 1
-                        )
-                        RETURNING *
-                        """,
-                        {
-                            "group_id": group_id,
-                            "profile_id": profile_id,
-                            "run_id": run_id,
-                            "max_cycles": self.config.limits.max_cycles
-                        }
+                    # Count attempts in this session
+                    session_attempts = await self.db.get_task_attempts_count_by_run(
+                        task['id'], run_id, status='success'
                     )
+                    cycle_display = f"session cycle {session_attempts + 1}/{self.config.limits.max_cycles}"
                 else:
-                    # Legacy: use global completed_cycles
-                    cursor = conn.execute(
-                        """
-                        UPDATE tasks
-                        SET
-                            status = 'in_progress',
-                            assigned_profile_id = :profile_id,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = (
-                            SELECT id FROM tasks
-                            WHERE
-                                group_id = :group_id
-                                AND is_blocked = 0
-                                AND completed_cycles < total_cycles
-                                AND (next_available_at IS NULL OR next_available_at <= CURRENT_TIMESTAMP)
-                                AND (status = 'pending' OR (status = 'in_progress' AND assigned_profile_id = :profile_id))
-                            ORDER BY
-                                completed_cycles ASC,               -- Priority: fewer cycles done
-                                last_attempt_at ASC NULLS FIRST     -- Then: not attempted recently
-                            LIMIT 1
-                        )
-                        RETURNING *
-                        """,
-                        {"group_id": group_id, "profile_id": profile_id}
-                    )
+                    cycle_display = f"cycle {task['completed_cycles'] + 1}/{task['total_cycles']}"
 
-                row = cursor.fetchone()
-                if row:
-                    task = dict(row)
-                    if run_id:
-                        # Count attempts in this session
-                        session_attempts = self.db.get_task_attempts_count_by_run(
-                            task['id'], run_id, status='success'
-                        )
-                        cycle_display = f"session cycle {session_attempts + 1}/{self.config.limits.max_cycles}"
-                    else:
-                        cycle_display = f"cycle {task['completed_cycles'] + 1}/{task['total_cycles']}"
-
-                    self.logger.debug(
-                        f"Task acquired: {task['chat_username']} "
-                        f"(group: {group_id}, {cycle_display}) "
-                        f"by profile {profile_id}"
-                    )
-                    return task
-                else:
-                    self.logger.debug(f"No tasks available for profile {profile_id} in group {group_id}")
-                    return None
+                self.logger.debug(
+                    f"Task acquired: {task['chat_username']} "
+                    f"(group: {group_id}, {cycle_display}) "
+                    f"by profile {profile_id}"
+                )
+                return task
+            else:
+                self.logger.debug(f"No tasks available for profile {profile_id} in group {group_id}")
+                return None
 
         except Exception as e:
             self.logger.error(f"Error getting next task: {e}")
@@ -186,7 +107,7 @@ class TaskQueue:
         self.logger.debug(f"Calculated delay: {actual_delay:.1f}s (base: {base_delay:.1f}s)")
         return actual_delay
 
-    def get_random_message(self, group_id: str) -> str:
+    async def get_random_message(self, group_id: str) -> str:
         """
         Get random message from active messages for a specific group.
 
@@ -196,7 +117,7 @@ class TaskQueue:
         Returns:
             Random message text
         """
-        messages = self.db.get_active_messages(group_id)
+        messages = await self.db.get_active_messages(group_id)
 
         if not messages:
             raise RuntimeError(f"No active messages available for group {group_id}. Please import messages first.")
@@ -205,7 +126,7 @@ class TaskQueue:
         self.logger.debug(f"Selected random message for group {group_id}: {message[:50]}...")
         return message
 
-    def mark_task_success(
+    async def mark_task_success(
         self,
         task_id: int,
         profile_id: str,
@@ -224,7 +145,7 @@ class TaskQueue:
             run_id: Optional session ID for per-session tracking
         """
         try:
-            task = self.db.get_task_by_id(task_id)
+            task = await self.db.get_task_by_id(task_id)
             if not task:
                 self.logger.error(f"Task {task_id} not found")
                 return
@@ -234,7 +155,7 @@ class TaskQueue:
             # Calculate cycle number based on run_id or global counter
             if run_id:
                 # Session-based: count attempts in this session
-                cycle_number = self.db.get_task_attempts_count_by_run(
+                cycle_number = await self.db.get_task_attempts_count_by_run(
                     task_id, run_id, status='success'
                 ) + 1
             else:
@@ -242,7 +163,7 @@ class TaskQueue:
                 cycle_number = task['completed_cycles'] + 1
 
             # Record attempt
-            self.db.add_task_attempt(
+            await self.db.add_task_attempt(
                 task_id=task_id,
                 profile_id=profile_id,
                 cycle_number=cycle_number,
@@ -252,20 +173,20 @@ class TaskQueue:
             )
 
             # Update task counters
-            self.db.increment_task_success(task_id)
-            self.db.increment_completed_cycles(task_id)
+            await self.db.increment_task_success(task_id)
+            await self.db.increment_completed_cycles(task_id)
 
             # Update message usage
-            self.db.increment_message_usage(message_text)
+            await self.db.increment_message_usage(message_text)
 
             # Update profile stats (hourly counter)
-            self.db.update_profile_stats(profile_id)
+            await self.db.update_profile_stats(profile_id)
 
             # Update profile daily stats
-            self.db.update_profile_daily_stats(profile_id, success=True)
+            await self.db.update_profile_daily_stats(profile_id, success=True)
 
             # Log to send_log
-            self.db.log_send(
+            await self.db.log_send(
                 group_id=group_id,
                 task_id=task_id,
                 profile_id=profile_id,
@@ -277,7 +198,7 @@ class TaskQueue:
             # Check if task is completed for this session or globally
             if run_id:
                 # Session-based: check if reached max_cycles for this session
-                session_attempts = self.db.get_task_attempts_count_by_run(
+                session_attempts = await self.db.get_task_attempts_count_by_run(
                     task_id, run_id, status='success'
                 )
                 if session_attempts >= self.config.limits.max_cycles:
@@ -288,19 +209,19 @@ class TaskQueue:
                 else:
                     # Set next available time for cycle delay
                     cycle_delay_seconds = self.config.limits.cycle_delay_minutes * 60
-                    self.db.set_task_next_available(task_id, cycle_delay_seconds)
+                    await self.db.set_task_next_available(task_id, cycle_delay_seconds)
                     self.logger.debug(
                         f"Task {task['chat_username']} will be available again in {cycle_delay_seconds}s"
                     )
             else:
                 # Legacy: check global completed_cycles
-                updated_task = self.db.get_task_by_id(task_id)
+                updated_task = await self.db.get_task_by_id(task_id)
                 if updated_task['completed_cycles'] >= updated_task['total_cycles']:
                     self.logger.info(f"Task completed: {task['chat_username']}")
                 else:
                     # Set next available time for cycle delay
                     cycle_delay_seconds = self.config.limits.cycle_delay_minutes * 60
-                    self.db.set_task_next_available(task_id, cycle_delay_seconds)
+                    await self.db.set_task_next_available(task_id, cycle_delay_seconds)
                     self.logger.debug(
                         f"Task {task['chat_username']} will be available again in {cycle_delay_seconds}s"
                     )
@@ -308,7 +229,7 @@ class TaskQueue:
         except Exception as e:
             self.logger.error(f"Error marking task success: {e}")
 
-    def mark_task_failed(
+    async def mark_task_failed(
         self,
         task_id: int,
         profile_id: str,
@@ -331,7 +252,7 @@ class TaskQueue:
             run_id: Optional session ID for per-session tracking
         """
         try:
-            task = self.db.get_task_by_id(task_id)
+            task = await self.db.get_task_by_id(task_id)
             if not task:
                 self.logger.error(f"Task {task_id} not found")
                 return
@@ -341,7 +262,7 @@ class TaskQueue:
             # Calculate cycle number based on run_id or global counter
             if run_id:
                 # Session-based: count all attempts in this session
-                cycle_number = self.db.get_task_attempts_count_by_run(
+                cycle_number = await self.db.get_task_attempts_count_by_run(
                     task_id, run_id
                 ) + 1
             else:
@@ -349,7 +270,7 @@ class TaskQueue:
                 cycle_number = task['completed_cycles'] + 1
 
             # Record attempt
-            self.db.add_task_attempt(
+            await self.db.add_task_attempt(
                 task_id=task_id,
                 profile_id=profile_id,
                 cycle_number=cycle_number,
@@ -360,14 +281,14 @@ class TaskQueue:
             )
 
             # Update task counters
-            self.db.increment_task_failed(task_id)
-            self.db.increment_completed_cycles(task_id)
+            await self.db.increment_task_failed(task_id)
+            await self.db.increment_completed_cycles(task_id)
 
             # Update profile daily stats
-            self.db.update_profile_daily_stats(profile_id, success=False)
+            await self.db.update_profile_daily_stats(profile_id, success=False)
 
             # Log to send_log
-            self.db.log_send(
+            await self.db.log_send(
                 group_id=group_id,
                 task_id=task_id,
                 profile_id=profile_id,
@@ -380,15 +301,14 @@ class TaskQueue:
 
             # Block task if needed
             if should_block:
-                self.db.block_task(task_id, block_reason or error_type)
+                await self.db.block_task(task_id, block_reason or error_type)
                 self.logger.warning(
                     f"Task blocked: {task['chat_username']} - {block_reason or error_type}"
                 )
             else:
                 # If not blocked, add a small backoff delay to prevent immediate retry loop
-                # This helps when multiple workers are running and one task keeps failing
                 backoff_seconds = 300  # 5 minutes backoff
-                self.db.set_task_next_available(task_id, backoff_seconds)
+                await self.db.set_task_next_available(task_id, backoff_seconds)
                 self.logger.debug(
                     f"Task {task['chat_username']} failed (not blocked), backing off for {backoff_seconds}s"
                 )
@@ -396,7 +316,7 @@ class TaskQueue:
         except Exception as e:
             self.logger.error(f"Error marking task failed: {e}")
 
-    def get_queue_stats(self) -> Dict[str, Any]:
+    async def get_queue_stats(self) -> Dict[str, Any]:
         """
         Get current queue statistics.
 
@@ -404,14 +324,14 @@ class TaskQueue:
             Dictionary with queue statistics
         """
         try:
-            stats = self.db.get_task_stats()
+            stats = await self.db.get_task_stats()
 
             # Calculate percentages
-            total = stats.get('total', 0)
+            total = stats.get('total', 0) or 0
             if total > 0:
-                stats['pending_percent'] = (stats.get('pending', 0) / total) * 100
-                stats['completed_percent'] = (stats.get('completed', 0) / total) * 100
-                stats['blocked_percent'] = (stats.get('blocked', 0) / total) * 100
+                stats['pending_percent'] = ((stats.get('pending') or 0) / total) * 100
+                stats['completed_percent'] = ((stats.get('completed') or 0) / total) * 100
+                stats['blocked_percent'] = ((stats.get('blocked') or 0) / total) * 100
             else:
                 stats['pending_percent'] = 0
                 stats['completed_percent'] = 0
@@ -423,7 +343,7 @@ class TaskQueue:
             self.logger.error(f"Error getting queue stats: {e}")
             return {}
 
-    def reset_stale_tasks(self, timeout_minutes: int = 30, group_id: Optional[str] = None) -> int:
+    async def reset_stale_tasks(self, timeout_minutes: int = 30, group_id: Optional[str] = None) -> int:
         """
         Reset tasks that have been in progress for too long.
 
@@ -437,36 +357,30 @@ class TaskQueue:
             Number of reset tasks
         """
         try:
-            with self.db.transaction() as conn:
+            async with self.db.transaction() as conn:
                 cutoff_time = datetime.now() - timedelta(minutes=timeout_minutes)
 
                 if group_id:
-                    cursor = conn.execute(
-                        """
+                    result = await conn.fetch('''
                         UPDATE tasks
                         SET status = 'pending',
                             assigned_profile_id = NULL
                         WHERE status = 'in_progress'
-                          AND group_id = ?
-                          AND updated_at < ?
+                          AND group_id = $1
+                          AND updated_at < $2
                         RETURNING chat_username
-                        """,
-                        (group_id, cutoff_time,)
-                    )
+                    ''', group_id, cutoff_time)
                 else:
-                    cursor = conn.execute(
-                        """
+                    result = await conn.fetch('''
                         UPDATE tasks
                         SET status = 'pending',
                             assigned_profile_id = NULL
                         WHERE status = 'in_progress'
-                          AND updated_at < ?
+                          AND updated_at < $1
                         RETURNING chat_username
-                        """,
-                        (cutoff_time,)
-                    )
+                    ''', cutoff_time)
 
-                reset_tasks = [row[0] for row in cursor.fetchall()]
+                reset_tasks = [row['chat_username'] for row in result]
 
                 if reset_tasks:
                     self.logger.warning(
@@ -481,12 +395,20 @@ class TaskQueue:
 
 
 # Global task queue instance
-_task_queue_instance: Optional[TaskQueue] = None
+_task_queue_instance: Optional[AsyncTaskQueue] = None
 
 
-def get_task_queue() -> TaskQueue:
+def get_task_queue() -> AsyncTaskQueue:
     """Get global task queue instance."""
     global _task_queue_instance
     if _task_queue_instance is None:
-        _task_queue_instance = TaskQueue()
+        db = get_database()
+        _task_queue_instance = AsyncTaskQueue(db)
+    return _task_queue_instance
+
+
+def init_task_queue(db: AsyncDatabase) -> AsyncTaskQueue:
+    """Initialize global task queue with database instance."""
+    global _task_queue_instance
+    _task_queue_instance = AsyncTaskQueue(db)
     return _task_queue_instance

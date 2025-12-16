@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script to start Telegram automation for a campaign group.
+Script to start Telegram automation for a campaign group (async version).
 
 Usage:
     # Interactive mode
@@ -25,7 +25,7 @@ from src.config import load_config, load_groups
 from src.database import init_database
 from src.logger import init_logger, get_logger
 from src.profile_manager import init_profile_manager, get_profile_manager
-from src.task_queue import get_task_queue
+from src.task_queue import init_task_queue
 from src.main import WorkerManager
 from interactive_utils import (
     show_header, show_menu, get_choice, get_input,
@@ -33,14 +33,17 @@ from interactive_utils import (
 )
 
 
-def start_group(group_id: str, workers: int = None, all_profiles: bool = False):
+async def async_start_group(group_id: str, workers: int = None, all_profiles: bool = False):
     """
-    Start automation for a specific group.
+    Start automation for a specific group (async version).
 
     Args:
         group_id: Campaign group ID
         workers: Number of workers (None = all group profiles)
         all_profiles: Use all available profiles instead of group profiles
+
+    Returns:
+        True if successful, False otherwise
     """
     # Load groups
     try:
@@ -61,96 +64,111 @@ def start_group(group_id: str, workers: int = None, all_profiles: bool = False):
     # Merge group settings with base config
     config = group.get_merged_config(config)
 
-    db = init_database(config.database.absolute_path)
+    db = await init_database(config.database)
     logger = init_logger(
         log_dir="logs",
         level=config.logging.level,
         log_format=config.logging.format
     )
     init_profile_manager()
-    task_queue = get_task_queue()
+    task_queue = init_task_queue(db)
 
-    # Reset any stale tasks from previous crashes (for this group)
-    logger.info(f"Resetting stale tasks for group '{group_id}'...")
-    stale_count = task_queue.reset_stale_tasks(group_id=group_id)
-    if stale_count > 0:
-        logger.info(f"Reset {stale_count} stale tasks")
-
-    # Get profiles for this group
-    if all_profiles:
-        # Use all active profiles from database
-        profiles = db.get_active_profiles()
-        logger.info("Using all available profiles (--all-profiles flag)")
-    else:
-        # Use profiles from group configuration
-        profile_manager = get_profile_manager()
-        profiles = []
-        for profile_identifier in group.profiles:
-            # Try to find by UUID first, then by name
-            profile = profile_manager.get_profile_by_id(profile_identifier)
-            if not profile:
-                profile = profile_manager.get_profile_by_name(profile_identifier)
-
-            if profile:
-                # Check if profile is in database and active
-                db_profile = db.get_profile_by_id(profile.profile_id)
-
-                if db_profile:
-                    # Profile exists in database
-                    if db_profile.get('is_active', True):
-                        profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
-                    else:
-                        logger.warning(f"Profile {profile.profile_name} ({profile.profile_id}) is inactive in database")
-                else:
-                    # Profile not in database - add it automatically
-                    logger.info(f"Auto-adding profile to database: {profile.profile_name}")
-                    try:
-                        profile_manager.validate_profile(profile)
-                        db.add_profile(profile.profile_id, profile.profile_name)
-                        profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
-                        logger.info(f"✓ Profile added: {profile.profile_name} ({profile.profile_id})")
-                    except ValueError as e:
-                        logger.error(f"Failed to add profile {profile.profile_name}: {e}")
-            else:
-                logger.warning(f"Profile '{profile_identifier}' from group not found in Donut Browser")
-
-    if not profiles:
-        print(f"Error: No active profiles for group '{group_id}'.", file=sys.stderr)
-        return False
-
-    # Limit workers if specified
-    if workers:
-        profiles = profiles[:workers]
-
-    profile_ids = [p['profile_id'] for p in profiles]
-
-    print(f"\n╔══════════════════════════════════════════════════════════════╗")
-    print(f"║  Starting automation for group: {group_id:<31}║")
-    print(f"║  Workers: {len(profile_ids):<52}║")
-    print(f"╚══════════════════════════════════════════════════════════════╝")
-    print(f"\nProfiles: {', '.join([p['profile_name'] for p in profiles])}\n")
-
-    # Create worker manager
-    manager = WorkerManager(profile_ids, group_id)
-
-    # Setup signal handler for graceful shutdown
-    def signal_handler(sig, frame):
-        print("\n\nReceived interrupt signal. Stopping workers...")
-        asyncio.create_task(manager.stop_all())
-
-    signal.signal(signal.SIGINT, signal_handler)
-
-    # Run workers
     try:
-        asyncio.run(manager.start_all())
-        print("\n✓ All workers finished successfully")
-        return True
-    except KeyboardInterrupt:
-        print("\n\nStopped by user")
-        return False
+        # Reset any stale tasks from previous crashes (for this group)
+        logger.info(f"Resetting stale tasks for group '{group_id}'...")
+        stale_count = await task_queue.reset_stale_tasks(group_id=group_id)
+        if stale_count > 0:
+            logger.info(f"Reset {stale_count} stale tasks")
+
+        # Get profiles for this group
+        if all_profiles:
+            # Use all active profiles from database
+            profiles = await db.get_active_profiles()
+            logger.info("Using all available profiles (--all-profiles flag)")
+        else:
+            # Use profiles from group configuration
+            profile_manager = get_profile_manager()
+            profiles = []
+            for profile_identifier in group.profiles:
+                # Try to find by UUID first, then by name
+                profile = profile_manager.get_profile_by_id(profile_identifier)
+                if not profile:
+                    profile = profile_manager.get_profile_by_name(profile_identifier)
+
+                if profile:
+                    # Check if profile is in database and active
+                    db_profile = await db.get_profile_by_id(profile.profile_id)
+
+                    if db_profile:
+                        # Profile exists in database
+                        if db_profile.get('is_active', True):
+                            profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
+                        else:
+                            logger.warning(f"Profile {profile.profile_name} ({profile.profile_id}) is inactive in database")
+                    else:
+                        # Profile not in database - add it automatically
+                        logger.info(f"Auto-adding profile to database: {profile.profile_name}")
+                        try:
+                            profile_manager.validate_profile(profile)
+                            await db.add_profile(profile.profile_id, profile.profile_name)
+                            profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
+                            logger.info(f"✓ Profile added: {profile.profile_name} ({profile.profile_id})")
+                        except ValueError as e:
+                            logger.error(f"Failed to add profile {profile.profile_name}: {e}")
+                else:
+                    logger.warning(f"Profile '{profile_identifier}' from group not found in Donut Browser")
+
+        if not profiles:
+            print(f"Error: No active profiles for group '{group_id}'.", file=sys.stderr)
+            return False
+
+        # Limit workers if specified
+        if workers:
+            profiles = profiles[:workers]
+
+        profile_ids = [p['profile_id'] for p in profiles]
+
+        print(f"\n╔══════════════════════════════════════════════════════════════╗")
+        print(f"║  Starting automation for group: {group_id:<31}║")
+        print(f"║  Workers: {len(profile_ids):<52}║")
+        print(f"╚══════════════════════════════════════════════════════════════╝")
+        print(f"\nProfiles: {', '.join([p['profile_name'] for p in profiles])}\n")
+
+        # Create worker manager
+        manager = WorkerManager(profile_ids, group_id)
+        print(f"Session ID (run_id): {manager.run_id}\n")
+
+        # Run workers
+        try:
+            await manager.start_all()
+            print("\n✓ All workers finished successfully")
+            return True
+        except KeyboardInterrupt:
+            print("\n\nStopped by user")
+            await manager.stop_all()
+            return False
+
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         logger.error(f"Fatal error: {e}", exc_info=True)
+        return False
+    finally:
+        await db.close()
+
+
+def start_group(group_id: str, workers: int = None, all_profiles: bool = False):
+    """
+    Start automation for a specific group.
+
+    Args:
+        group_id: Campaign group ID
+        workers: Number of workers (None = all group profiles)
+        all_profiles: Use all available profiles instead of group profiles
+    """
+    try:
+        return asyncio.run(async_start_group(group_id, workers, all_profiles))
+    except KeyboardInterrupt:
+        print("\n\nStopped by user")
         return False
 
 

@@ -1,5 +1,5 @@
 """
-Main CLI module for Telegram Automation System
+Main CLI module for Telegram Automation System (async version)
 
 Provides command-line interface for managing profiles, tasks, and automation.
 """
@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import load_config, create_default_config, get_config, load_groups, DEFAULT_CONFIG_PATH
-from .database import init_database, get_database
+from .database import init_database, get_database, close_database
 from .logger import init_logger, get_logger
 from .profile_manager import init_profile_manager, get_profile_manager
-from .task_queue import get_task_queue
+from .task_queue import init_task_queue, get_task_queue
 
 # Project root is parent of src/
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -260,8 +260,8 @@ class WorkerManager:
         logger.info("All workers stopped")
 
 
-def cmd_init(args):
-    """Initialize database and create default config."""
+async def async_cmd_init(args):
+    """Initialize database and create default config (async)."""
     print("Initializing Telegram Automation System...")
 
     # Create default config if doesn't exist
@@ -275,9 +275,14 @@ def cmd_init(args):
     # Load config
     config = load_config()
 
-    # Initialize database
-    print(f"Initializing database: {config.database.absolute_path}")
-    init_database(config.database.absolute_path)
+    # Initialize database (async)
+    print(f"Initializing database: PostgreSQL @ {config.database.postgresql.host}:{config.database.postgresql.port}")
+    db = await init_database(config.database)
+
+    # Schema should be applied already, but we can verify connection
+    print("✓ Database connection verified")
+
+    await db.close()
 
     print("\n✓ Initialization complete!")
     print("\nNext steps:")
@@ -288,8 +293,13 @@ def cmd_init(args):
     print("\nNote: Messages from groups.json are imported automatically on first start")
 
 
-def cmd_import_chats(args):
-    """Import chats from file."""
+def cmd_init(args):
+    """Initialize database and create default config."""
+    asyncio.run(async_cmd_init(args))
+
+
+async def async_cmd_import_chats(args):
+    """Import chats from file (async)."""
     chats_file = Path(args.file)
 
     if not chats_file.exists():
@@ -298,29 +308,37 @@ def cmd_import_chats(args):
 
     # Load config and init
     config = load_config(args.config)
-    db = init_database(config.database.absolute_path)
+    db = await init_database(config.database)
 
-    # Read chats from file
-    chats = []
-    with open(chats_file, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                chats.append(line)
+    try:
+        # Read chats from file
+        chats = []
+        with open(chats_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    chats.append(line)
 
-    if not chats:
-        print("Error: No chats found in file", file=sys.stderr)
-        sys.exit(1)
+        if not chats:
+            print("Error: No chats found in file", file=sys.stderr)
+            sys.exit(1)
 
-    # Import to database
-    print(f"Importing {len(chats)} chats for group '{args.group}'...")
-    count = db.import_chats(args.group, chats, total_cycles=config.limits.max_cycles)
+        # Import to database
+        print(f"Importing {len(chats)} chats for group '{args.group}'...")
+        count = await db.import_chats(args.group, chats, total_cycles=config.limits.max_cycles)
 
-    print(f"✓ Imported {count} chats successfully for group '{args.group}'")
+        print(f"✓ Imported {count} chats successfully for group '{args.group}'")
+    finally:
+        await db.close()
 
 
-def cmd_import_messages(args):
-    """Import messages from JSON file."""
+def cmd_import_chats(args):
+    """Import chats from file."""
+    asyncio.run(async_cmd_import_chats(args))
+
+
+async def async_cmd_import_messages(args):
+    """Import messages from JSON file (async)."""
     messages_file = Path(args.file)
 
     if not messages_file.exists():
@@ -329,81 +347,106 @@ def cmd_import_messages(args):
 
     # Load config and init
     config = load_config(args.config)
-    db = init_database(config.database.absolute_path)
+    db = await init_database(config.database)
 
-    # Read messages from JSON
-    with open(messages_file, 'r', encoding='utf-8') as f:
-        messages = json.load(f)
+    try:
+        # Read messages from JSON
+        with open(messages_file, 'r', encoding='utf-8') as f:
+            messages = json.load(f)
 
-    if not isinstance(messages, list):
-        print("Error: Messages file must contain a JSON array", file=sys.stderr)
-        sys.exit(1)
+        if not isinstance(messages, list):
+            print("Error: Messages file must contain a JSON array", file=sys.stderr)
+            sys.exit(1)
 
-    if not messages:
-        print("Error: No messages found in file", file=sys.stderr)
-        sys.exit(1)
+        if not messages:
+            print("Error: No messages found in file", file=sys.stderr)
+            sys.exit(1)
 
-    # Import to database
-    print(f"Importing {len(messages)} messages for group '{args.group}'...")
-    count = db.import_messages(args.group, messages)
+        # Import to database
+        print(f"Importing {len(messages)} messages for group '{args.group}'...")
+        count = await db.import_messages(args.group, messages)
 
-    print(f"✓ Imported {count} messages successfully for group '{args.group}'")
+        print(f"✓ Imported {count} messages successfully for group '{args.group}'")
+    finally:
+        await db.close()
+
+
+def cmd_import_messages(args):
+    """Import messages from JSON file."""
+    asyncio.run(async_cmd_import_messages(args))
+
+
+async def async_cmd_add_profile(args):
+    """Add profile to automation (async)."""
+    # Load config and init
+    config = load_config(args.config)
+    db = await init_database(config.database)
+    profile_manager = init_profile_manager()
+
+    try:
+        # Get profile by name or ID
+        profile_names = args.profiles
+
+        try:
+            profiles = profile_manager.find_profiles_by_names(profile_names)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Add to database
+        for profile in profiles:
+            try:
+                profile_manager.validate_profile(profile)
+                await db.add_profile(profile.profile_id, profile.profile_name)
+                print(f"✓ Added profile: {profile.profile_name} ({profile.profile_id})")
+            except ValueError as e:
+                print(f"✗ Skipped {profile.profile_name}: {e}", file=sys.stderr)
+    finally:
+        await db.close()
 
 
 def cmd_add_profile(args):
     """Add profile to automation."""
-    # Load config and init
-    config = load_config(args.config)
-    db = init_database(config.database.absolute_path)
-    profile_manager = init_profile_manager()
-
-    # Get profile by name or ID
-    profile_names = args.profiles
-
-    try:
-        profiles = profile_manager.find_profiles_by_names(profile_names)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # Add to database
-    for profile in profiles:
-        try:
-            profile_manager.validate_profile(profile)
-            db.add_profile(profile.profile_id, profile.profile_name)
-            print(f"✓ Added profile: {profile.profile_name} ({profile.profile_id})")
-        except ValueError as e:
-            print(f"✗ Skipped {profile.profile_name}: {e}", file=sys.stderr)
+    asyncio.run(async_cmd_add_profile(args))
 
 
-def cmd_list_profiles(args):
-    """List available profiles."""
+async def async_cmd_list_profiles(args):
+    """List available profiles (async)."""
     profile_manager = init_profile_manager()
 
     if args.db_only:
         # List profiles in database
         config = load_config(args.config)
-        db = init_database(config.database.absolute_path)
-        profiles = db.get_active_profiles()
+        db = await init_database(config.database)
 
-        print(f"\nProfiles in database ({len(profiles)}):\n")
-        print(f"{'Name':<20} {'ID':<36} {'Active':<8} {'Blocked':<8}")
-        print("-" * 75)
+        try:
+            profiles = await db.get_active_profiles()
 
-        for profile in profiles:
-            print(
-                f"{profile['profile_name']:<20} "
-                f"{profile['profile_id']:<36} "
-                f"{'Yes' if profile['is_active'] else 'No':<8} "
-                f"{'Yes' if profile['is_blocked'] else 'No':<8}"
-            )
+            print(f"\nProfiles in database ({len(profiles)}):\n")
+            print(f"{'Name':<20} {'ID':<36} {'Active':<8} {'Blocked':<8}")
+            print("-" * 75)
+
+            for profile in profiles:
+                print(
+                    f"{profile['profile_name']:<20} "
+                    f"{profile['profile_id']:<36} "
+                    f"{'Yes' if profile['is_active'] else 'No':<8} "
+                    f"{'Yes' if profile['is_blocked'] else 'No':<8}"
+                )
+        finally:
+            await db.close()
     else:
         # List all Donut Browser profiles
         profile_manager.print_profiles_table()
 
 
-def cmd_start(args):
-    """Start automation with workers."""
+def cmd_list_profiles(args):
+    """List available profiles."""
+    asyncio.run(async_cmd_list_profiles(args))
+
+
+async def async_cmd_start(args):
+    """Start automation with workers (async)."""
     # Load groups
     try:
         groups_data = load_groups()
@@ -423,150 +466,171 @@ def cmd_start(args):
     # Merge group settings with base config
     config = group.get_merged_config(config)
 
-    db = init_database(config.database.absolute_path)
+    db = await init_database(config.database)
     logger = init_logger(
         log_dir="logs",
         level=config.logging.level,
         log_format=config.logging.format
     )
     init_profile_manager()
-    task_queue = get_task_queue()
+    task_queue = init_task_queue(db)
 
-    # Auto-import messages from group config if not already in database
-    logger.info(f"[AUTO-IMPORT] Checking messages for group '{args.group}'")
-    logger.debug(f"[AUTO-IMPORT] Group config has {len(group.messages)} messages")
-    if group.messages:
-        existing_messages = db.get_active_messages(args.group)
-        logger.debug(f"[AUTO-IMPORT] Database has {len(existing_messages)} active messages for this group")
-
-        if not existing_messages:
-            logger.info(f"[AUTO-IMPORT] Starting auto-import of {len(group.messages)} messages...")
-            logger.debug(f"[AUTO-IMPORT] Messages to import: {group.messages[:2]}... (showing first 2)")
-            count = db.import_messages(args.group, group.messages)
-            logger.info(f"[AUTO-IMPORT] ✓ Successfully imported {count} messages from group config")
-
-            # Verify import
-            verification = db.get_active_messages(args.group)
-            logger.info(f"[AUTO-IMPORT] Verification: {len(verification)} messages now in database")
-        else:
-            logger.info(f"[AUTO-IMPORT] Skipping import - group already has {len(existing_messages)} messages in database")
-    else:
-        logger.warning(f"[AUTO-IMPORT] Group '{args.group}' has no messages in config file!")
-
-    # Reset any stale tasks from previous crashes (for this group)
-    logger.info(f"Resetting stale tasks for group '{args.group}'...")
-    stale_count = task_queue.reset_stale_tasks(group_id=args.group)
-    if stale_count > 0:
-        logger.info(f"Reset {stale_count} stale tasks")
-
-    # Get profiles for this group
-    if args.all_profiles:
-        # Use all active profiles from database
-        profiles = db.get_active_profiles()
-        logger.info(f"Using all available profiles (--all-profiles flag)")
-    else:
-        # Use profiles from group configuration
-        profile_manager = get_profile_manager()
-        profiles = []
-        for profile_identifier in group.profiles:
-            # Try to find by UUID first, then by name
-            profile = profile_manager.get_profile_by_id(profile_identifier)
-            if not profile:
-                profile = profile_manager.get_profile_by_name(profile_identifier)
-
-            if profile:
-                # Check if profile is in database and active
-                db_profile = db.get_profile_by_id(profile.profile_id)
-
-                if db_profile:
-                    # Profile exists in database
-                    if db_profile.get('is_active', True):
-                        profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
-                    else:
-                        logger.warning(f"Profile {profile.profile_name} ({profile.profile_id}) is inactive in database")
-                else:
-                    # Profile not in database - add it automatically
-                    logger.info(f"Auto-adding profile to database: {profile.profile_name}")
-                    try:
-                        profile_manager.validate_profile(profile)
-                        db.add_profile(profile.profile_id, profile.profile_name)
-                        profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
-                        logger.info(f"✓ Profile added: {profile.profile_name} ({profile.profile_id})")
-                    except ValueError as e:
-                        logger.error(f"Failed to add profile {profile.profile_name}: {e}")
-            else:
-                logger.warning(f"Profile '{profile_identifier}' from group not found in Donut Browser")
-
-    if not profiles:
-        print(f"Error: No active profiles for group '{args.group}'.", file=sys.stderr)
-        sys.exit(1)
-
-    # Limit workers if specified
-    if args.workers:
-        profiles = profiles[:args.workers]
-
-    profile_ids = [p['profile_id'] for p in profiles]
-
-    print(f"\n╔══════════════════════════════════════════════════════════════╗")
-    print(f"║  Starting automation for group: {args.group:<31}║")
-    print(f"║  Workers: {len(profile_ids):<52}║")
-    print(f"╚══════════════════════════════════════════════════════════════╝")
-    print(f"\nProfiles: {', '.join([p['profile_name'] for p in profiles])}\n")
-
-    # Create worker manager
-    manager = WorkerManager(profile_ids, args.group)
-    print(f"Session ID (run_id): {manager.run_id}\n")
-
-    # Run workers
     try:
-        asyncio.run(manager.start_all())
+        # Auto-import messages from group config if not already in database
+        logger.info(f"[AUTO-IMPORT] Checking messages for group '{args.group}'")
+        logger.debug(f"[AUTO-IMPORT] Group config has {len(group.messages)} messages")
+        if group.messages:
+            existing_messages = await db.get_active_messages(args.group)
+            logger.debug(f"[AUTO-IMPORT] Database has {len(existing_messages)} active messages for this group")
+
+            if not existing_messages:
+                logger.info(f"[AUTO-IMPORT] Starting auto-import of {len(group.messages)} messages...")
+                logger.debug(f"[AUTO-IMPORT] Messages to import: {group.messages[:2]}... (showing first 2)")
+                count = await db.import_messages(args.group, group.messages)
+                logger.info(f"[AUTO-IMPORT] ✓ Successfully imported {count} messages from group config")
+
+                # Verify import
+                verification = await db.get_active_messages(args.group)
+                logger.info(f"[AUTO-IMPORT] Verification: {len(verification)} messages now in database")
+            else:
+                logger.info(f"[AUTO-IMPORT] Skipping import - group already has {len(existing_messages)} messages in database")
+        else:
+            logger.warning(f"[AUTO-IMPORT] Group '{args.group}' has no messages in config file!")
+
+        # Reset any stale tasks from previous crashes (for this group)
+        logger.info(f"Resetting stale tasks for group '{args.group}'...")
+        stale_count = await task_queue.reset_stale_tasks(group_id=args.group)
+        if stale_count > 0:
+            logger.info(f"Reset {stale_count} stale tasks")
+
+        # Get profiles for this group
+        if args.all_profiles:
+            # Use all active profiles from database
+            profiles = await db.get_active_profiles()
+            logger.info(f"Using all available profiles (--all-profiles flag)")
+        else:
+            # Use profiles from group configuration
+            profile_manager = get_profile_manager()
+            profiles = []
+            for profile_identifier in group.profiles:
+                # Try to find by UUID first, then by name
+                profile = profile_manager.get_profile_by_id(profile_identifier)
+                if not profile:
+                    profile = profile_manager.get_profile_by_name(profile_identifier)
+
+                if profile:
+                    # Check if profile is in database and active
+                    db_profile = await db.get_profile_by_id(profile.profile_id)
+
+                    if db_profile:
+                        # Profile exists in database
+                        if db_profile.get('is_active', True):
+                            profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
+                        else:
+                            logger.warning(f"Profile {profile.profile_name} ({profile.profile_id}) is inactive in database")
+                    else:
+                        # Profile not in database - add it automatically
+                        logger.info(f"Auto-adding profile to database: {profile.profile_name}")
+                        try:
+                            profile_manager.validate_profile(profile)
+                            await db.add_profile(profile.profile_id, profile.profile_name)
+                            profiles.append({'profile_id': profile.profile_id, 'profile_name': profile.profile_name})
+                            logger.info(f"✓ Profile added: {profile.profile_name} ({profile.profile_id})")
+                        except ValueError as e:
+                            logger.error(f"Failed to add profile {profile.profile_name}: {e}")
+                else:
+                    logger.warning(f"Profile '{profile_identifier}' from group not found in Donut Browser")
+
+        if not profiles:
+            print(f"Error: No active profiles for group '{args.group}'.", file=sys.stderr)
+            sys.exit(1)
+
+        # Limit workers if specified
+        if args.workers:
+            profiles = profiles[:args.workers]
+
+        profile_ids = [p['profile_id'] for p in profiles]
+
+        print(f"\n╔══════════════════════════════════════════════════════════════╗")
+        print(f"║  Starting automation for group: {args.group:<31}║")
+        print(f"║  Workers: {len(profile_ids):<52}║")
+        print(f"╚══════════════════════════════════════════════════════════════╝")
+        print(f"\nProfiles: {', '.join([p['profile_name'] for p in profiles])}\n")
+
+        # Create worker manager
+        manager = WorkerManager(profile_ids, args.group)
+        print(f"Session ID (run_id): {manager.run_id}\n")
+
+        # Run workers (use inner run to keep db connection alive)
+        try:
+            await manager.start_all()
+        except KeyboardInterrupt:
+            print("\n\nShutdown requested (Ctrl+C)...")
+            print("Stopping all workers gracefully...")
+            await manager.stop_all()
+
+        print("\n✓ Automation completed")
+
+    finally:
+        await db.close()
+
+
+def cmd_start(args):
+    """Start automation with workers."""
+    try:
+        asyncio.run(async_cmd_start(args))
     except KeyboardInterrupt:
         print("\n\nShutdown requested (Ctrl+C)...")
-        print("Stopping all workers gracefully...")
-        # Graceful shutdown of workers
-        asyncio.run(manager.stop_all())
+        sys.exit(0)
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        print(f"Fatal error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print("\n✓ Automation completed")
+
+async def async_cmd_status(args):
+    """Show automation status (async)."""
+    # Load config and init
+    config = load_config(args.config)
+    init_logger(level=config.logging.level, log_format=config.logging.format)
+    db = await init_database(config.database)
+    task_queue = init_task_queue(db)
+
+    try:
+        # Get queue stats
+        stats = await task_queue.get_queue_stats()
+
+        print("\n" + "=" * 60)
+        print("AUTOMATION STATUS")
+        print("=" * 60)
+
+        print(f"\nTasks Overview:")
+        print(f"  Total tasks:     {stats.get('total', 0)}")
+        print(f"  Pending:         {stats.get('pending', 0)} ({stats.get('pending_percent', 0):.1f}%)")
+        print(f"  In Progress:     {stats.get('in_progress', 0)}")
+        print(f"  Completed:       {stats.get('completed', 0)} ({stats.get('completed_percent', 0):.1f}%)")
+        print(f"  Blocked:         {stats.get('blocked', 0)} ({stats.get('blocked_percent', 0):.1f}%)")
+
+        print(f"\nResults:")
+        print(f"  Total Success:   {stats.get('total_success', 0)}")
+        print(f"  Total Failed:    {stats.get('total_failed', 0)}")
+
+        # Profile stats
+        profiles = await db.get_active_profiles()
+        if profiles:
+            print(f"\nActive Profiles ({len(profiles)}):")
+            for profile in profiles:
+                status = "BLOCKED" if profile['is_blocked'] else "Active"
+                print(f"  - {profile['profile_name']}: {status}")
+
+        print("\n" + "=" * 60 + "\n")
+
+    finally:
+        await db.close()
 
 
 def cmd_status(args):
     """Show automation status."""
-    # Load config and init
-    config = load_config(args.config)
-    init_logger(level=config.logging.level, log_format=config.logging.format)
-    db = init_database(config.database.absolute_path)
-    task_queue = get_task_queue()
-
-    # Get queue stats
-    stats = task_queue.get_queue_stats()
-
-    print("\n" + "=" * 60)
-    print("AUTOMATION STATUS")
-    print("=" * 60)
-
-    print(f"\nTasks Overview:")
-    print(f"  Total tasks:     {stats.get('total', 0)}")
-    print(f"  Pending:         {stats.get('pending', 0)} ({stats.get('pending_percent', 0):.1f}%)")
-    print(f"  In Progress:     {stats.get('in_progress', 0)}")
-    print(f"  Completed:       {stats.get('completed', 0)} ({stats.get('completed_percent', 0):.1f}%)")
-    print(f"  Blocked:         {stats.get('blocked', 0)} ({stats.get('blocked_percent', 0):.1f}%)")
-
-    print(f"\nResults:")
-    print(f"  Total Success:   {stats.get('total_success', 0)}")
-    print(f"  Total Failed:    {stats.get('total_failed', 0)}")
-
-    # Profile stats
-    profiles = db.get_active_profiles()
-    if profiles:
-        print(f"\nActive Profiles ({len(profiles)}):")
-        for profile in profiles:
-            status = "BLOCKED" if profile['is_blocked'] else "Active"
-            print(f"  - {profile['profile_name']}: {status}")
-
-    print("\n" + "=" * 60 + "\n")
+    asyncio.run(async_cmd_status(args))
 
 
 def cmd_stop(args):

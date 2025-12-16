@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script for managing tasks (chats) in campaign groups.
+Script for managing tasks (chats) in campaign groups (async version).
 
 Usage:
     # Interactive mode
@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import load_config, load_groups
-from src.database import init_database, get_database
+from src.database import init_database
 from interactive_utils import (
     show_header, show_menu, get_choice, get_input,
     show_groups, validate_file_exists, validate_group_exists, confirm
@@ -31,8 +32,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_CHATS_FILE = PROJECT_ROOT / "data" / "chats.txt"
 
 
-def load_tasks(group_id: str, file_path: str):
-    """Load tasks from file into group."""
+async def async_load_tasks(group_id: str, file_path: str):
+    """Load tasks from file into group (async)."""
     try:
         groups_data = load_groups()
     except FileNotFoundError:
@@ -64,16 +65,23 @@ def load_tasks(group_id: str, file_path: str):
         print("Error: config.yaml not found. Run: python -m src.main init")
         return
 
-    db = init_database(config.database.absolute_path)
+    db = await init_database(config.database)
 
-    # Import chats into database
-    count = db.import_chats(group_id, chats, total_cycles=1)
+    try:
+        # Import chats into database
+        count = await db.import_chats(group_id, chats, total_cycles=1)
+        print(f"✓ Loaded {count} chat(s) into group '{group_id}'")
+    finally:
+        await db.close()
 
-    print(f"✓ Loaded {count} chat(s) into group '{group_id}'")
+
+def load_tasks(group_id: str, file_path: str):
+    """Load tasks from file into group."""
+    asyncio.run(async_load_tasks(group_id, file_path))
 
 
-def clear_tasks(group_id: str, skip_confirm: bool = False):
-    """Clear all tasks from group."""
+async def async_clear_tasks(group_id: str, skip_confirm: bool = False):
+    """Clear all tasks from group (async)."""
     try:
         groups_data = load_groups()
     except FileNotFoundError:
@@ -99,16 +107,23 @@ def clear_tasks(group_id: str, skip_confirm: bool = False):
         print("Error: config.yaml not found. Run: python -m src.main init")
         return
 
-    db = init_database(config.database.absolute_path)
+    db = await init_database(config.database)
 
-    # Clear tasks
-    db.clear_group_tasks(group_id)
+    try:
+        # Clear tasks
+        await db.clear_group_tasks(group_id)
+        print(f"✓ Cleared all tasks from group '{group_id}'")
+    finally:
+        await db.close()
 
-    print(f"✓ Cleared all tasks from group '{group_id}'")
+
+def clear_tasks(group_id: str, skip_confirm: bool = False):
+    """Clear all tasks from group."""
+    asyncio.run(async_clear_tasks(group_id, skip_confirm))
 
 
-def show_stats(group_id: str):
-    """Show statistics for group."""
+async def async_show_stats(group_id: str):
+    """Show statistics for group (async)."""
     try:
         groups_data = load_groups()
     except FileNotFoundError:
@@ -127,25 +142,33 @@ def show_stats(group_id: str):
         print("Error: config.yaml not found. Run: python -m src.main init")
         return
 
-    db = init_database(config.database.absolute_path)
+    db = await init_database(config.database)
 
-    # Get stats
-    stats = db.get_group_stats(group_id)
+    try:
+        # Get stats
+        stats = await db.get_group_stats(group_id)
 
-    if not stats:
-        print(f"No statistics found for group '{group_id}'")
-        return
+        if not stats:
+            print(f"No statistics found for group '{group_id}'")
+            return
 
-    print(f"\nStatistics for group: {group_id}")
-    print("=" * 80)
-    print(f"Total tasks:       {stats.get('total_tasks', 0)}")
-    print(f"Pending:           {stats.get('pending_tasks', 0)}")
-    print(f"In progress:       {stats.get('in_progress_tasks', 0)}")
-    print(f"Completed:         {stats.get('completed_tasks', 0)}")
-    print(f"Blocked:           {stats.get('blocked_tasks', 0)}")
-    print(f"\nSuccessful sends:  {stats.get('total_successful_sends', 0)}")
-    print(f"Failed sends:      {stats.get('total_failed_sends', 0)}")
-    print(f"\nMessage templates: {stats.get('message_templates_count', 0)}")
+        print(f"\nStatistics for group: {group_id}")
+        print("=" * 80)
+        print(f"Total tasks:       {stats.get('total_tasks', 0)}")
+        print(f"Pending:           {stats.get('pending_tasks', 0)}")
+        print(f"In progress:       {stats.get('in_progress_tasks', 0)}")
+        print(f"Completed:         {stats.get('completed_tasks', 0)}")
+        print(f"Blocked:           {stats.get('blocked_tasks', 0)}")
+        print(f"\nSuccessful sends:  {stats.get('total_successful_sends', 0)}")
+        print(f"Failed sends:      {stats.get('total_failed_sends', 0)}")
+        print(f"\nMessage templates: {stats.get('message_templates_count', 0)}")
+    finally:
+        await db.close()
+
+
+def show_stats(group_id: str):
+    """Show statistics for group."""
+    asyncio.run(async_show_stats(group_id))
 
 
 def interactive_mode():

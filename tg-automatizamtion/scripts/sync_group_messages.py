@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script to sync messages from groups.json to database.
+Script to sync messages from groups.json to database (async version).
 
 Usage:
     # Interactive mode
@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
@@ -26,8 +27,8 @@ from interactive_utils import (
 )
 
 
-def sync_messages(group_id: str):
-    """Sync messages from JSON to database for a group."""
+async def async_sync_messages(group_id: str):
+    """Sync messages from JSON to database for a group (async)."""
     try:
         groups_data = load_groups()
     except FileNotFoundError:
@@ -50,32 +51,65 @@ def sync_messages(group_id: str):
         print("Error: config.yaml not found. Run: python -m src.main init")
         return False
 
-    db = init_database(config.database.absolute_path)
+    db = await init_database(config.database)
 
-    # Clear existing messages for this group
-    db.clear_group_messages(group_id)
+    try:
+        # Clear existing messages for this group
+        await db.clear_group_messages(group_id)
 
-    # Import messages
-    count = db.import_messages(group_id, group.messages)
+        # Import messages
+        count = await db.import_messages(group_id, group.messages)
 
-    print(f"✓ Synced {count} message(s) to database for group '{group_id}'")
-    return True
+        print(f"✓ Synced {count} message(s) to database for group '{group_id}'")
+        return True
+    finally:
+        await db.close()
 
 
-def sync_all_groups():
-    """Sync messages for all groups."""
+def sync_messages(group_id: str):
+    """Sync messages from JSON to database for a group."""
+    return asyncio.run(async_sync_messages(group_id))
+
+
+async def async_sync_all_groups():
+    """Sync messages for all groups (async)."""
     try:
         groups_data = load_groups()
     except FileNotFoundError:
         print("Error: No groups file found.")
         return False
 
-    success = True
-    for group in groups_data.groups:
-        if not sync_messages(group.id):
-            success = False
+    # Load config and database once
+    try:
+        config = load_config()
+    except FileNotFoundError:
+        print("Error: config.yaml not found. Run: python -m src.main init")
+        return False
 
-    return success
+    db = await init_database(config.database)
+
+    try:
+        success = True
+        for group in groups_data.groups:
+            if not group.messages:
+                print(f"Skipping '{group.id}' - no messages in config")
+                continue
+
+            # Clear existing messages for this group
+            await db.clear_group_messages(group.id)
+
+            # Import messages
+            count = await db.import_messages(group.id, group.messages)
+            print(f"✓ Synced {count} message(s) to database for group '{group.id}'")
+
+        return success
+    finally:
+        await db.close()
+
+
+def sync_all_groups():
+    """Sync messages for all groups."""
+    return asyncio.run(async_sync_all_groups())
 
 
 def interactive_mode():
