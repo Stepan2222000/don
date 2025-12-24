@@ -17,6 +17,7 @@ timeouts:
 # Telegram
 telegram:
   url: "https://web.telegram.org/k"
+  headless: false                        # Показывать браузер (для тестирования)
 
 # Повторные попытки
 retry:
@@ -58,7 +59,7 @@ database:
 
 # Управление прокси
 proxy:
-  enabled: false                       # Глобальный переключатель прокси (true/false)
+  enabled: true                        # Глобальный переключатель прокси (true/false)
   disabled_profiles: []                # Список UUID профилей без прокси
   pool_file: "data/proxies.txt"        # Файл с прокси (host:port:user:pass)
   min_attempts_for_check: 10           # Мин. попыток перед анализом
