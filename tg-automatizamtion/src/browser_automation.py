@@ -445,6 +445,7 @@ class BrowserAutomationSimplified:
         self.playwright: Optional[Playwright] = None
         self.context = None
         self.page: Optional[Page] = None
+        self.video_path: Optional[str] = None  # Путь к записанному видео
 
     async def launch_browser(
         self,
@@ -492,12 +493,21 @@ class BrowserAutomationSimplified:
                 logger.info(f"Using proxy override: {proxy_override.split('@')[-1] if '@' in proxy_override else proxy_override}")
         config = get_config()
 
+        # Prepare video recording if enabled
+        video_dir = self._prepare_video_dir(profile.profile_id)
+        video_size = {"width": config.video.width, "height": config.video.height} if video_dir else None
+
+        if video_dir:
+            logger.info(f"Video recording enabled: {video_dir}")
+
         self.context = await self.playwright.firefox.launch_persistent_context(
             user_data_dir=str(profile.browser_data_path),
             executable_path=profile.executable_path,
             headless=config.telegram.headless,
             proxy=proxy_config,
             env=env_vars,
+            record_video_dir=video_dir,
+            record_video_size=video_size,
         )
 
         # Get or create page
@@ -546,11 +556,54 @@ class BrowserAutomationSimplified:
 
         return env_vars
 
+    def _prepare_video_dir(self, profile_id: str) -> Optional[str]:
+        """
+        Prepare video recording directory for profile session.
+
+        Creates directory structure: {output_dir}/{profile_id}/{timestamp}/
+
+        Args:
+            profile_id: Profile UUID
+
+        Returns:
+            Absolute path to video directory, or None if video disabled
+        """
+        from datetime import datetime
+        from .config import PROJECT_ROOT
+
+        config = get_config()
+
+        if not config.video.enabled:
+            return None
+
+        # Generate timestamp for session folder
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Build path: logs/videos/{profile_id}/{timestamp}/
+        video_dir = Path(config.video.output_dir) / profile_id / timestamp
+
+        # Resolve to absolute path from PROJECT_ROOT
+        if not video_dir.is_absolute():
+            video_dir = PROJECT_ROOT / video_dir
+
+        # Create directory
+        video_dir.mkdir(parents=True, exist_ok=True)
+
+        return str(video_dir)
+
     async def close_browser(self):
         """Close browser and cleanup (ASYNC)."""
         logger = get_logger()
 
         try:
+            # Получить путь к видео до закрытия (видео сохраняется при закрытии контекста)
+            if self.page and self.page.video:
+                try:
+                    self.video_path = await self.page.video.path()
+                    logger.info(f"Video saved: {self.video_path}")
+                except Exception as e:
+                    logger.warning(f"Could not get video path: {e}")
+
             if self.page:
                 await self.page.close()
                 self.page = None

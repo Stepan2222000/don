@@ -37,6 +37,13 @@ screenshots:
   format: "png"                        # png/jpeg
   max_age_days: 30                     # Удалять скриншоты старше N дней
 
+# Запись видео
+video:
+  enabled: false                       # Включить/выключить запись видео
+  output_dir: "logs/videos"            # Папка для сохранения видео
+  width: 854                           # Ширина видео (480p)
+  height: 480                          # Высота видео (480p)
+
 # Логирование
 logging:
   level: "DEBUG"                        # DEBUG/INFO/WARNING/ERROR

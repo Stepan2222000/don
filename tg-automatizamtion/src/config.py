@@ -64,6 +64,15 @@ class ScreenshotsConfig:
 
 
 @dataclass
+class VideoConfig:
+    """Video recording configuration."""
+    enabled: bool = False                    # Выключено по умолчанию
+    output_dir: str = "logs/videos"          # Базовая папка для видео
+    width: int = 854                         # 480p ширина (16:9)
+    height: int = 480                        # 480p высота
+
+
+@dataclass
 class LoggingConfig:
     """Logging configuration."""
     level: str = "INFO"
@@ -161,6 +170,7 @@ class Config:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     screenshots: ScreenshotsConfig = field(default_factory=ScreenshotsConfig)
+    video: VideoConfig = field(default_factory=VideoConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
@@ -182,6 +192,7 @@ class Config:
             telegram=TelegramConfig(**data.get('telegram', {})),
             retry=RetryConfig(**data.get('retry', {})),
             screenshots=ScreenshotsConfig(**data.get('screenshots', {})),
+            video=VideoConfig(**data.get('video', {})),
             logging=LoggingConfig(**data.get('logging', {})),
             database=db_config,
             proxy=ProxyConfig(**data.get('proxy', {}))
@@ -271,6 +282,7 @@ class Config:
             'telegram': self.telegram.__dict__.copy(),
             'retry': self.retry.__dict__.copy(),
             'screenshots': self.screenshots.__dict__.copy(),
+            'video': self.video.__dict__.copy(),
             'logging': self.logging.__dict__.copy(),
             'database': {
                 'type': self.database.type,
