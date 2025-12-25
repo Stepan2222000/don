@@ -7,8 +7,13 @@ Each worker runs with its own browser instance.
 
 import asyncio
 import argparse
+import signal
 import sys
 from typing import Optional
+
+# Global reference for signal handler
+_current_worker = None
+_shutdown_requested = False
 
 from .config import load_config, get_config
 from .database import init_database, get_database, close_database, AsyncDatabase
@@ -365,6 +370,7 @@ async def async_main(args):
             return 1
 
         # Create and run worker
+        global _current_worker
         worker = AsyncWorker(
             profile=profile,
             group_id=args.group_id,
@@ -374,6 +380,7 @@ async def async_main(args):
             use_simplified=args.simplified,
             run_id=args.run_id
         )
+        _current_worker = worker  # Store for signal handler
         exit_code = await worker.run()
         return exit_code
 
@@ -391,8 +398,34 @@ async def async_main(args):
             await db.close()
 
 
+def _handle_shutdown_signal(signum, frame):
+    """Handle SIGTERM/SIGINT for graceful shutdown with video save."""
+    global _shutdown_requested, _current_worker
+    signal_name = 'SIGTERM' if signum == signal.SIGTERM else 'SIGINT'
+    print(f"\n[SHUTDOWN] Received {signal_name}, saving video and closing browser...")
+    _shutdown_requested = True
+
+    # Try to close browser synchronously to save video
+    if _current_worker and _current_worker.browser_automation:
+        try:
+            # Create new event loop for cleanup if needed
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(_current_worker.browser_automation.close_browser())
+            loop.close()
+            print("[SHUTDOWN] Browser closed, video saved!")
+        except Exception as e:
+            print(f"[SHUTDOWN] Error closing browser: {e}")
+
+    sys.exit(0)
+
+
 def main():
     """Worker entry point (for subprocess execution)."""
+    # Register signal handlers for graceful shutdown (saves video)
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
+
     parser = argparse.ArgumentParser(description="Telegram Automation Worker")
     parser.add_argument(
         '--profile-id',

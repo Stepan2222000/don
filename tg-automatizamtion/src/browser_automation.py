@@ -12,7 +12,8 @@ import platform
 import os
 from pathlib import Path
 from typing import Optional
-from playwright.async_api import async_playwright, Browser, Page, Playwright
+from playwright.async_api import async_playwright, Browser, Page, Playwright, BrowserContext
+from camoufox.async_api import AsyncCamoufox
 
 from .profile_manager import DonutProfile
 from .logger import get_logger
@@ -443,9 +444,10 @@ class BrowserAutomationSimplified:
     def __init__(self):
         """Initialize simplified browser automation."""
         self.playwright: Optional[Playwright] = None
-        self.context = None
+        self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self.video_path: Optional[str] = None  # Путь к записанному видео
+        self._camoufox_context = None  # AsyncCamoufox context manager
 
     async def launch_browser(
         self,
@@ -455,7 +457,13 @@ class BrowserAutomationSimplified:
         disable_proxy: bool = False
     ) -> Page:
         """
-        Launch browser with Playwright directly (ASYNC).
+        Launch browser with AsyncCamoufox (ASYNC).
+
+        Uses Camoufox Python library for:
+        - headless="virtual" - automatic Xvfb on Linux
+        - geoip=True - auto geolocation by proxy IP
+        - humanize=True - human-like mouse movements
+        - config= - fingerprint passed directly (no env vars)
 
         Args:
             profile: DonutProfile to launch
@@ -470,18 +478,10 @@ class BrowserAutomationSimplified:
         logger = get_logger()
         logger.log_browser_launch(profile.profile_name)
 
-        # Parse fingerprint
+        # Parse fingerprint as dict (передаём напрямую через config=)
         fingerprint_config = json.loads(profile.fingerprint) if profile.fingerprint else {}
 
-        # Prepare environment variables for Camoufox fingerprint
-        # Camoufox expects fingerprint in CAMOU_CONFIG_* env vars
-        env_vars = self._prepare_fingerprint_env(fingerprint_config)
-
-        # Start Playwright (async)
-        self.playwright = await async_playwright().start()
-
-        # Launch persistent context with fingerprint
-        # If proxy disabled, ignore all proxy settings
+        # Prepare proxy config
         if disable_proxy:
             proxy_config = None
             logger.info("Proxy disabled - running without proxy")
@@ -491,6 +491,7 @@ class BrowserAutomationSimplified:
             proxy_config = _parse_proxy_url(proxy_url) if proxy_url else None
             if proxy_override:
                 logger.info(f"Using proxy override: {proxy_override.split('@')[-1] if '@' in proxy_override else proxy_override}")
+
         config = get_config()
 
         # Prepare video recording if enabled
@@ -500,15 +501,32 @@ class BrowserAutomationSimplified:
         if video_dir:
             logger.info(f"Video recording enabled: {video_dir}")
 
-        self.context = await self.playwright.firefox.launch_persistent_context(
-            user_data_dir=str(profile.browser_data_path),
+        # Log headless mode
+        headless_mode = config.telegram.headless
+        if headless_mode == "virtual":
+            logger.info("Using headless='virtual' mode (automatic Xvfb)")
+        elif headless_mode:
+            logger.info("Using headless=True mode")
+        else:
+            logger.info("Using headless=False mode (visible browser)")
+
+        # Create AsyncCamoufox context manager
+        # Передаём fingerprint через config= вместо env vars
+        self._camoufox_context = AsyncCamoufox(
             executable_path=profile.executable_path,
-            headless=config.telegram.headless,
+            user_data_dir=str(profile.browser_data_path),
+            persistent_context=True,
+            headless=headless_mode,  # bool или "virtual"
             proxy=proxy_config,
-            env=env_vars,
+            geoip=config.telegram.geoip,
+            humanize=config.telegram.humanize,
+            config=fingerprint_config,  # fingerprint напрямую, без env vars
             record_video_dir=video_dir,
             record_video_size=video_size,
         )
+
+        # Enter context manager to get BrowserContext
+        self.context = await self._camoufox_context.__aenter__()
 
         # Get or create page
         if self.context.pages:
@@ -518,43 +536,10 @@ class BrowserAutomationSimplified:
 
         # Navigate to URL with retry logic for white page detection (async)
         logger.log_telegram_navigation(profile.profile_name)
-        # Use new retry logic with white page detection
         await _load_telegram_with_retry(self.page, url, logger, max_retries=3)
 
         logger.info(f"Browser launched successfully: {profile.profile_name}")
         return self.page
-
-    def _prepare_fingerprint_env(self, fingerprint: dict) -> dict:
-        """
-        Prepare environment variables for Camoufox fingerprint.
-
-        Camoufox expects fingerprint configuration in CAMOU_CONFIG_* env vars.
-        Large configs are split into chunks.
-        """
-        # Start with system environment (includes DISPLAY for Xvfb)
-        env_vars = os.environ.copy()
-
-        # Ensure DISPLAY is set for headless servers
-        if 'DISPLAY' not in env_vars:
-            env_vars['DISPLAY'] = ':99'
-
-        if not fingerprint:
-            return env_vars
-
-        # Convert fingerprint to JSON string
-        fingerprint_json = json.dumps(fingerprint)
-
-        # Split into chunks if needed (Camoufox uses multiple env vars for large configs)
-        chunk_size = 32000  # 32KB chunks
-        chunks = []
-        for i in range(0, len(fingerprint_json), chunk_size):
-            chunks.append(fingerprint_json[i:i + chunk_size])
-
-        # Add Camoufox env vars
-        for i, chunk in enumerate(chunks, start=1):
-            env_vars[f"CAMOU_CONFIG_{i}"] = chunk
-
-        return env_vars
 
     def _prepare_video_dir(self, profile_id: str) -> Optional[str]:
         """
@@ -596,11 +581,13 @@ class BrowserAutomationSimplified:
         logger = get_logger()
 
         try:
-            # Получить путь к видео до закрытия (видео сохраняется при закрытии контекста)
+            # Сохраняем ссылку на video объект до закрытия страницы
+            video_obj = None
+            video_temp_path = None
             if self.page and self.page.video:
+                video_obj = self.page.video
                 try:
-                    self.video_path = await self.page.video.path()
-                    logger.info(f"Video saved: {self.video_path}")
+                    video_temp_path = await video_obj.path()
                 except Exception as e:
                     logger.warning(f"Could not get video path: {e}")
 
@@ -608,13 +595,35 @@ class BrowserAutomationSimplified:
                 await self.page.close()
                 self.page = None
 
-            if self.context:
-                await self.context.close()
+            # AsyncCamoufox управляет context и playwright внутри себя
+            # Закрываем через __aexit__ context manager
+            if self._camoufox_context:
+                await self._camoufox_context.__aexit__(None, None, None)
+                self._camoufox_context = None
                 self.context = None
-
-            if self.playwright:
-                await self.playwright.stop()
                 self.playwright = None
+            else:
+                # Fallback для старого кода (если запущен без AsyncCamoufox)
+                if self.context:
+                    await self.context.close()
+                    self.context = None
+
+                if self.playwright:
+                    await self.playwright.stop()
+                    self.playwright = None
+
+            # Видео финализируется при закрытии context
+            # Ждём немного и логируем путь
+            if video_temp_path:
+                import asyncio
+                import os
+                await asyncio.sleep(2)  # Даём время на финализацию
+                self.video_path = video_temp_path
+                if os.path.exists(video_temp_path):
+                    size = os.path.getsize(video_temp_path)
+                    logger.info(f"Video saved: {self.video_path} ({size} bytes)")
+                else:
+                    logger.warning(f"Video file not found: {video_temp_path}")
 
             logger.debug("Browser closed successfully")
 

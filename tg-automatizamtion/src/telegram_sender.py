@@ -170,6 +170,19 @@ class TelegramSender:
             True if popup was found and closed, False otherwise
         """
         try:
+            # First, close notification banner "Never miss a message!"
+            try:
+                notification_banner = self.page.locator("div:has-text('Never miss a message')").first
+                if await notification_banner.count() > 0:
+                    close_btn = self.page.locator("div:has-text('Never miss a message') button, div:has-text('Never miss a message') ~ button").first
+                    if await close_btn.count() > 0:
+                        await close_btn.click(timeout=2000)
+                        await self.page.wait_for_timeout(300)
+                        self.logger.info("Closed notification banner")
+                        return True
+            except Exception:
+                pass  # Ignore errors, try other popups
+
             # Close all active popups (including Stars)
             popup_selectors = [
                 "div.popup.popup-stars.active",  # Stars popup with active class

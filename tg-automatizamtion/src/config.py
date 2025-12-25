@@ -8,7 +8,7 @@ Supports campaign groups with per-group settings.
 import json
 import yaml
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass, field
 
 # Determine project root directory (parent of src/)
@@ -38,7 +38,9 @@ class TimeoutsConfig:
 class TelegramConfig:
     """Telegram-specific configuration."""
     url: str = "https://web.telegram.org/k"
-    headless: bool = False
+    headless: Union[bool, str] = False  # bool или "virtual" для автоматического Xvfb
+    geoip: bool = True  # Автоопределение геолокации по IP прокси
+    humanize: Union[bool, float] = True  # Человекоподобные движения мыши (True или float секунд)
 
 
 @dataclass

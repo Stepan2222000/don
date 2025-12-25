@@ -2,6 +2,7 @@
 
 # Browser automation
 playwright>=1.40.0
+camoufox[geoip]>=0.4.0
 
 # Configuration
 pyyaml>=6.0

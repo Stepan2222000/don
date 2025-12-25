@@ -3,7 +3,7 @@
 
 # Лимиты и ограничения
 limits:
-  max_messages_per_hour: 25              # Сообщений в час на профиль
+  max_messages_per_hour: 200              # Сообщений в час на профиль
   max_cycles: 100                        # Количество циклов (проходов по всем чатам)
   delay_randomness: 0.2                # ±20% к рассчитанной задержке
   cycle_delay_minutes: 5              # Задержка между циклами (минуты)
@@ -17,7 +17,9 @@ timeouts:
 # Telegram
 telegram:
   url: "https://web.telegram.org/k"
-  headless: false                        # Показывать браузер (для тестирования)
+  headless: false                          # false/true/"virtual" - false + Xvfb для видеозаписи
+  geoip: true                            # Автоопределение геолокации по IP прокси
+  humanize: true                         # Человекоподобные движения мыши (true или float секунд)
 
 # Повторные попытки
 retry:
@@ -39,10 +41,10 @@ screenshots:
 
 # Запись видео
 video:
-  enabled: false                       # Включить/выключить запись видео
+  enabled: true                        # Включить/выключить запись видео
   output_dir: "logs/videos"            # Папка для сохранения видео
-  width: 854                           # Ширина видео (480p)
-  height: 480                          # Высота видео (480p)
+  width: 640                           # Ширина видео (360p - экономия места)
+  height: 360                          # Высота видео (360p)
 
 # Логирование
 logging:
@@ -66,7 +68,7 @@ database:
 
 # Управление прокси
 proxy:
-  enabled: true                        # Глобальный переключатель прокси (true/false)
+  enabled: false                       # Глобальный переключатель прокси (true/false)
   disabled_profiles: []                # Список UUID профилей без прокси
   pool_file: "data/proxies.txt"        # Файл с прокси (host:port:user:pass)
   min_attempts_for_check: 10           # Мин. попыток перед анализом
